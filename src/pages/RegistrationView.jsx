@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../api/useAuth.js';
 
+import logo from '../images/logo.png';
+
 const RegistrationView = () => {
     const navigate = useNavigate();
     const auth = useAuth();
@@ -78,7 +80,8 @@ const RegistrationView = () => {
     return (
         <div className="registration-wrapper">
             <div className="registration-card">
-                <h1 className="registration-title">Регистрация в BrainTube</h1>
+                <img className='logo' src={logo} />
+                <h1 className="registration-title">Регистрация</h1>
                 <div className="login-link">
                 Уже есть в BrainTube? <Link className="link" to="/authorization">Авторизоваться</Link>
                 </div>

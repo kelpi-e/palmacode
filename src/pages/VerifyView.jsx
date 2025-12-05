@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../api/useAuth.js';
 
+import logo from '../images/logo.png'
+
 const VerifyView = () => {
     const navigate = useNavigate();
     const [searchParams] = useSearchParams();
@@ -151,6 +153,7 @@ const VerifyView = () => {
         return (
             <div className="verify-container">
                 <div className="verify-card">
+                    <img className='logo' src={logo} />
                     <div className="verify-logo">
                         <div className="logo-icon">✓</div>
                         <h1>Подтвердите email</h1>
@@ -212,6 +215,7 @@ const VerifyView = () => {
         return (
             <div className="verify-container">
                 <div className="verify-card">
+                    <img className='logo' src={logo} />
                     <div className="verify-logo">
                         <h1>Проверьте почту</h1>
                         <p className="subtitle">
@@ -264,8 +268,8 @@ const VerifyView = () => {
     return (
         <div className="verify-container">
             <div className="verify-card">
+                <img className='logo' src={logo} />
                 <div className="verify-logo">
-                    <div className="logo-icon">🎉</div>
                     <h1>Почта подтверждена!</h1>
                     <p className="subtitle">
                         Ваш адрес электронной почты{' '}
@@ -279,8 +283,8 @@ const VerifyView = () => {
                 </div>
                 <button
                     className="btn"
-                    onClick={() => token ? navigate('/done') : navigate('/authorization')}>
-                    {token ? 'Перейти в личный кабинет' : 'Войти в аккаунт'}
+                    onClick={() => navigate('/authorization')}>
+                    Войти в аккаунт
                 </button>
                 <div className="resend-link">
                     Нужно подтвердить другой email?{' '}

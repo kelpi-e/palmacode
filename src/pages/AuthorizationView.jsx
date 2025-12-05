@@ -1,6 +1,8 @@
-import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { useAuth } from '../api/useAuth.js'
+import { useState } from 'react';
+import { useNavigate, Link } from 'react-router-dom';
+import { useAuth } from '../api/useAuth.js';
+
+import logo from '../images/logo.png';
 
 const AuthorizationView = () => {
   const navigate = useNavigate();
@@ -50,7 +52,11 @@ const AuthorizationView = () => {
   return (
     <div className="registration-wrapper">
       <div className="registration-card">
-        <h1 className="registration-title">Войти в BrainTube</h1>
+        <img className='logo' src={logo} />
+        <h1 className="registration-title">Войти</h1>
+        <div className="login-link">
+          Нет в BrainTube? <Link className="link" to="/">Зарегистрироваться</Link>
+        </div>
         <form className="registration-form" onSubmit={handleSubmit}>
           <div className="form-group">
             <input 
