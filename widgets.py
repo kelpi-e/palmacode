@@ -1,0 +1,102 @@
+"""
+Пользовательские виджеты для BrainBit Monitor
+"""
+from PyQt6.QtWidgets import QFrame, QVBoxLayout, QLabel
+
+
+class MetricCard(QFrame):
+    """Красивая карточка для отображения метрики"""
+    
+    # Размеры шрифтов
+    SIZE_LARGE = "large"    # Для мониторинга - крупные карточки
+    SIZE_SMALL = "small"    # Для проверки контакта - компактные карточки
+    
+    def __init__(self, title: str, initial_value: str = "—", color: str = "#58a6ff", size: str = "large"):
+        super().__init__()
+        self.setProperty("class", "card")
+        self.color = color
+        self.size = size
+        
+        # Определяем размеры в зависимости от типа
+        if size == self.SIZE_SMALL:
+            self.value_font_size = 16
+            self.title_font_size = 11
+            self.setMinimumWidth(80)
+            self.setMaximumWidth(120)
+        else:
+            self.value_font_size = 32
+            self.title_font_size = 12
+            self.setMinimumWidth(140)
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(4 if size == self.SIZE_SMALL else 8)
+        layout.setContentsMargins(12, 8, 12, 8)
+        
+        self.title_label = QLabel(title)
+        self.title_label.setStyleSheet(
+            f"color: #8b949e; font-size: {self.title_font_size}px; font-weight: 500;"
+        )
+        
+        self.value_label = QLabel(initial_value)
+        self.value_label.setStyleSheet(
+            f"color: {color}; font-size: {self.value_font_size}px; font-weight: 700;"
+        )
+        
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.value_label)
+    
+    def set_value(self, value: str):
+        self.value_label.setText(value)
+    
+    def set_color(self, color: str):
+        self.value_label.setStyleSheet(
+            f"color: {color}; font-size: {self.value_font_size}px; font-weight: 700;"
+        )
+
+
+class ResistCard(QFrame):
+    """Компактная карточка для отображения состояния электрода"""
+    
+    def __init__(self, title: str, initial_value: str = "—"):
+        super().__init__()
+        self.setProperty("class", "card")
+        self.setMinimumWidth(90)
+        self.setMaximumWidth(130)
+        self.setMinimumHeight(60)
+        self.setMaximumHeight(80)
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(2)
+        layout.setContentsMargins(10, 6, 10, 6)
+        
+        self.title_label = QLabel(title)
+        self.title_label.setStyleSheet(
+            "color: #8b949e; font-size: 12px; font-weight: 600;"
+        )
+        
+        self.value_label = QLabel(initial_value)
+        self.value_label.setStyleSheet(
+            "color: #8b949e; font-size: 14px; font-weight: 700;"
+        )
+        
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.value_label)
+    
+    def set_status(self, is_normal: bool):
+        if is_normal:
+            self.value_label.setText("✓ OK")
+            self.value_label.setStyleSheet(
+                "color: #3fb950; font-size: 14px; font-weight: 700;"
+            )
+        else:
+            self.value_label.setText("✗ Плохо")
+            self.value_label.setStyleSheet(
+                "color: #f85149; font-size: 14px; font-weight: 700;"
+            )
+    
+    def reset(self):
+        self.value_label.setText("—")
+        self.value_label.setStyleSheet(
+            "color: #8b949e; font-size: 14px; font-weight: 700;"
+        )
+

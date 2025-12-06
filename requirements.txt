@@ -1,0 +1,7 @@
+pyneurosdk2
+pyem-st-artifacts
+PyQt6
+PyQt6-WebEngine
+pyqtgraph
+numpy
+opencv-python
