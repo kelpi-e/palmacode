@@ -3,6 +3,7 @@ import RegistrationView from '../pages/RegistrationView';
 import AuthorizationView from '../pages/AuthorizationView';
 import VerifyView from '../pages/VerifyView';
 import DoneView from '../pages/DoneView';
+import AnalyseVideoView from '../pages/AnalyseVideoView';
 
 const Router = () => {
   return (
@@ -12,6 +13,7 @@ const Router = () => {
         <Route path="/authorization" element={<AuthorizationView />} />
         <Route path="/verify" element={<VerifyView />} />
         <Route path="/done" element={<DoneView />} />
+        <Route path="/analyse-video" element={<AnalyseVideoView />} />
       </Routes>
     </BrowserRouter>
   );

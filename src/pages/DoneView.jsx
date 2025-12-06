@@ -1,35 +1,21 @@
-import { useNavigate } from 'react-router-dom';
-import { useAuth } from '../api/useAuth';
-
-import logo from '../images/logo.png';
-import Profile from '../images/Profile.png';
+import Header from '../components/Header';
 import NavComponents from '../components/NavComponents';
+import VideoComponent from '../components/VideoComponent';
 
 const DoneView = () => {
-  const navigate = useNavigate();
-  const auth = useAuth();
-
-  const handleProfileClick = () => {
-    console.log('Клик по профилю');
-  };
-
-  const handleLogout = () => {
-    auth.removeToken();
-    navigate('/authorization');
-  };
+  const videoCount = 6;
 
   return (
     <div className="done-wrapper">
-      <header className="main-header">
-        <img className='logo-main' src={logo} alt="BrainTube Logo" />
-        <button 
-          className="profile-button"
-          onClick={handleProfileClick}
-          aria-label="Профиль">
-          <img src={Profile} alt="Профиль пользователя" />
-        </button>
-      </header>
+      <Header />
       <NavComponents />
+      <div className="video-stats-grid">
+        {Array.from({ length: videoCount }).map((_, index) => (
+          <div className="video-item" key={index}>
+            <VideoComponent />
+          </div>
+        ))}
+      </div>
     </div>
   );
 };
