@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QPushButton, QLabel, QListWidget, QProgressBar,
     QLineEdit, QGroupBox, QFileDialog, QFrame, QSlider, QSplitter,
-    QDialog, QScrollArea, QMessageBox
+    QDialog, QScrollArea, QMessageBox, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal, QThread
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QBrush
@@ -42,7 +42,6 @@ class FullscreenVideoDialog(QDialog):
         self.video_widget = QVideoWidget()
         layout.addWidget(self.video_widget)
         
-        # Индикатор записи (если идёт запись)
         if is_recording:
             self.record_indicator = QLabel("REC", self)
             self.record_indicator.setStyleSheet("""
@@ -58,13 +57,11 @@ class FullscreenVideoDialog(QDialog):
             self.record_indicator.move(20, 20)
             self.record_indicator.raise_()
             
-            # Мигание индикатора
             self.blink_timer = QTimer(self)
             self.blink_timer.timeout.connect(self._blink_indicator)
             self.blink_timer.start(500)
             self.blink_state = True
         
-        # Предупреждение об электродах (изначально скрыто)
         self.electrode_warning = QLabel("Проверьте контакт электродов!", self)
         self.electrode_warning.setStyleSheet("""
             QLabel {
@@ -79,7 +76,6 @@ class FullscreenVideoDialog(QDialog):
         self.electrode_warning.adjustSize()
         self.electrode_warning.setVisible(False)
         
-        # Подсказка
         self.hint_label = QLabel("Esc — выход  |  Пробел — пауза", self)
         self.hint_label.setStyleSheet("""
             QLabel {
@@ -92,29 +88,21 @@ class FullscreenVideoDialog(QDialog):
         """)
         self.hint_label.adjustSize()
         
-        # Переключаем вывод видео на этот виджет
         self.media_player.setVideoOutput(self.video_widget)
-        
-        # Показываем в полный экран
         self.showFullScreen()
-        
-        # Позиционируем элементы
         QTimer.singleShot(100, self._position_elements)
     
     def _position_elements(self):
-        # Подсказка внизу по центру
         self.hint_label.move(
             (self.width() - self.hint_label.width()) // 2,
             self.height() - self.hint_label.height() - 20
         )
-        # Предупреждение об электродах вверху по центру
         self.electrode_warning.move(
             (self.width() - self.electrode_warning.width()) // 2,
             60
         )
     
     def show_electrode_warning(self, show: bool):
-        """Показать/скрыть предупреждение об электродах"""
         self.electrode_warning.setVisible(show)
     
     def _blink_indicator(self):
@@ -134,88 +122,392 @@ class FullscreenVideoDialog(QDialog):
     def closeEvent(self, event):
         if hasattr(self, 'blink_timer'):
             self.blink_timer.stop()
-        # Возвращаем вывод на оригинальный виджет
+        self.media_player.setVideoOutput(self.original_output)
+        event.accept()
+
+
+class ResultsFullscreenDialog(QDialog):
+    """Полноэкранный просмотр результатов с картой взгляда"""
+    position_changed = pyqtSignal(int)
+    
+    def __init__(self, media_player: QMediaPlayer, data, times, gaze_x, gaze_y, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Результаты - Полный экран")
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+        self.media_player = media_player
+        self.original_output = media_player.videoOutput()
+        self.data = data
+        self.times = times
+        self.gaze_x = gaze_x
+        self.gaze_y = gaze_y
+        
+        # Основной layout
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        
+        # Контейнер для видео (без layout, чтобы оверлей работал)
+        self.video_container = QWidget()
+        self.video_container.setStyleSheet("background-color: black;")
+        
+        # Видео виджет
+        self.video_widget = QVideoWidget(self.video_container)
+        
+        # Карта взгляда как оверлей поверх видео
+        self.gaze_overlay = GazeHeatmapWidget(overlay_mode=True)
+        self.gaze_overlay.setParent(self.video_container)
+        self.gaze_overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        
+        # Загружаем все точки взгляда
+        gaze_points = [(gaze_x[i], gaze_y[i], times[i]) 
+                       for i in range(len(times)) 
+                       if gaze_x[i] > 0 or gaze_y[i] > 0]
+        self.gaze_overlay.set_data(gaze_points)
+        
+        main_layout.addWidget(self.video_container, stretch=1)
+        
+        # Панель управления внизу
+        controls = QWidget()
+        controls.setFixedHeight(60)
+        controls.setStyleSheet("background-color: rgba(0, 0, 0, 0.9);")
+        controls_layout = QHBoxLayout(controls)
+        controls_layout.setContentsMargins(20, 10, 20, 10)
+        
+        self.play_btn = QPushButton("⏸")
+        self.play_btn.setFixedSize(50, 40)
+        self.play_btn.clicked.connect(self._toggle_play)
+        
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.sliderMoved.connect(self._seek)
+        
+        self.time_label = QLabel("00:00 / 00:00")
+        self.time_label.setStyleSheet("color: white; font-size: 14px;")
+        self.time_label.setFixedWidth(120)
+        
+        # Кнопка показать/скрыть взгляд
+        self.toggle_gaze_btn = QPushButton("Взгляд: ВКЛ")
+        self.toggle_gaze_btn.setFixedWidth(110)
+        self.toggle_gaze_btn.setCheckable(True)
+        self.toggle_gaze_btn.setChecked(True)
+        self.toggle_gaze_btn.clicked.connect(self._toggle_gaze)
+        
+        self.close_btn = QPushButton("✕ Закрыть")
+        self.close_btn.setFixedWidth(100)
+        self.close_btn.clicked.connect(self.close)
+        
+        controls_layout.addWidget(self.play_btn)
+        controls_layout.addWidget(self.slider, stretch=1)
+        controls_layout.addWidget(self.time_label)
+        controls_layout.addWidget(self.toggle_gaze_btn)
+        controls_layout.addWidget(self.close_btn)
+        
+        main_layout.addWidget(controls)
+        
+        # Подсказка
+        self.hint_label = QLabel("Esc — выход | Пробел — пауза | ← → — перемотка | G — взгляд", self)
+        self.hint_label.setStyleSheet("""
+            QLabel {
+                background-color: rgba(0, 0, 0, 0.7);
+                color: #8b949e;
+                font-size: 12px;
+                padding: 6px 12px;
+                border-radius: 4px;
+            }
+        """)
+        self.hint_label.adjustSize()
+        
+        # Подключаем сигналы плеера
+        self.media_player.positionChanged.connect(self._on_position)
+        self.media_player.durationChanged.connect(self._on_duration)
+        self.media_player.playbackStateChanged.connect(self._on_state)
+        
+        # Переключаем вывод
+        self.media_player.setVideoOutput(self.video_widget)
+        
+        # Таймер для обновления позиции взгляда
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self._update_gaze_position)
+        self.update_timer.setInterval(50)
+        self.update_timer.start()
+        
+        self.showFullScreen()
+        QTimer.singleShot(200, self._position_elements)
+    
+    def _position_elements(self):
+        # Видео и оверлей на всю область контейнера
+        w = self.video_container.width()
+        h = self.video_container.height()
+        
+        self.video_widget.setGeometry(0, 0, w, h)
+        self.gaze_overlay.setGeometry(0, 0, w, h)
+        self.gaze_overlay.raise_()
+        self.gaze_overlay.show()
+        
+        # Подсказка вверху по центру
+        self.hint_label.move(
+            (self.width() - self.hint_label.width()) // 2, 20)
+        self.hint_label.raise_()
+    
+    def _toggle_gaze(self):
+        """Показать/скрыть карту взгляда"""
+        if self.toggle_gaze_btn.isChecked():
+            self.gaze_overlay.show()
+            self.toggle_gaze_btn.setText("Взгляд: ВКЛ")
+        else:
+            self.gaze_overlay.hide()
+            self.toggle_gaze_btn.setText("Взгляд: ВЫКЛ")
+    
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(100, self._position_elements)
+    
+    def _toggle_play(self):
+        if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.media_player.pause()
+        else:
+            self.media_player.play()
+    
+    def _seek(self, pos):
+        self.media_player.setPosition(pos)
+    
+    def _on_position(self, pos):
+        self.slider.setValue(pos)
+        duration = self.media_player.duration()
+        self.time_label.setText(f"{self._format_time(pos)} / {self._format_time(duration)}")
+        self.position_changed.emit(pos)
+    
+    def _on_duration(self, duration):
+        self.slider.setRange(0, duration)
+    
+    def _on_state(self, state):
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self.play_btn.setText("⏸")
+        else:
+            self.play_btn.setText("▶")
+    
+    def _format_time(self, ms):
+        s = ms // 1000
+        return f"{s // 60:02d}:{s % 60:02d}"
+    
+    def _update_gaze_position(self):
+        """Обновить текущую позицию взгляда"""
+        if not self.data or not self.times:
+            return
+        
+        video_pos_ms = self.media_player.position()
+        
+        # Найти ближайшую запись
+        closest_idx = 0
+        min_diff = float('inf')
+        for i, record in enumerate(self.data):
+            diff = abs(record.get('video_ms', 0) - video_pos_ms)
+            if diff < min_diff:
+                min_diff = diff
+                closest_idx = i
+        
+        if closest_idx < len(self.data):
+            record = self.data[closest_idx]
+            gaze_x = record.get('gaze_x', 0)
+            gaze_y = record.get('gaze_y', 0)
+            
+            if gaze_x and gaze_y:
+                self.gaze_overlay.set_current_position(gaze_x, gaze_y)
+            else:
+                self.gaze_overlay.clear_current_position()
+    
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+        elif event.key() == Qt.Key.Key_Space:
+            self._toggle_play()
+        elif event.key() == Qt.Key.Key_Left:
+            self.media_player.setPosition(max(0, self.media_player.position() - 5000))
+        elif event.key() == Qt.Key.Key_Right:
+            self.media_player.setPosition(min(self.media_player.duration(), 
+                                              self.media_player.position() + 5000))
+        elif event.key() == Qt.Key.Key_G:
+            self.toggle_gaze_btn.setChecked(not self.toggle_gaze_btn.isChecked())
+            self._toggle_gaze()
+    
+    def closeEvent(self, event):
+        self.update_timer.stop()
         self.media_player.setVideoOutput(self.original_output)
         event.accept()
 
 
 class GazeHeatmapWidget(QWidget):
-    """Виджет для отображения тепловой карты взгляда"""
-    def __init__(self):
+    """Виджет для отображения тепловой карты взгляда (16:10 как экран)"""
+    ASPECT_RATIO = 16 / 10  # Соотношение сторон экрана
+    
+    def __init__(self, overlay_mode=False):
         super().__init__()
-        self.setMinimumSize(400, 300)
-        self.gaze_points = []  # [(x, y, timestamp), ...]
-        self.setStyleSheet("background-color: #0d1117; border-radius: 8px;")
+        self.overlay_mode = overlay_mode  # Режим наложения на видео
+        self.setMinimumSize(160, 100)
+        self.gaze_points = []
+        self.current_x = None
+        self.current_y = None
+        
+        if overlay_mode:
+            # Оверлей с полупрозрачным фоном
+            self.setAutoFillBackground(False)
+        else:
+            self.setStyleSheet("background-color: #0d1117; border-radius: 8px;")
     
     def set_data(self, points):
-        """Установить данные точек взгляда"""
         self.gaze_points = points
         self.update()
+    
+    def set_current_position(self, x, y):
+        """Установить текущую позицию взгляда"""
+        self.current_x = x
+        self.current_y = y
+        self.update()
+    
+    def clear_current_position(self):
+        """Очистить текущую позицию"""
+        self.current_x = None
+        self.current_y = None
+        self.update()
+    
+    def _get_screen_rect(self):
+        """Получить прямоугольник экрана 16:10 с отступами"""
+        margin = 5 if self.overlay_mode else 10
+        available_w = self.width() - margin * 2
+        available_h = self.height() - margin * 2
+        
+        if self.overlay_mode:
+            # В режиме наложения занимаем всю область
+            from PyQt6.QtCore import QRect
+            return QRect(margin, margin, available_w, available_h)
+        
+        # Вычисляем размер с сохранением пропорций 16:10
+        if available_w / available_h > self.ASPECT_RATIO:
+            h = available_h
+            w = int(h * self.ASPECT_RATIO)
+        else:
+            w = available_w
+            h = int(w / self.ASPECT_RATIO)
+        
+        x = (self.width() - w) // 2
+        y = (self.height() - h) // 2
+        
+        from PyQt6.QtCore import QRect
+        return QRect(x, y, w, h)
     
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
-        # Фон
-        painter.fillRect(self.rect(), QColor("#0d1117"))
+        if self.overlay_mode:
+            # Полупрозрачный тёмный фон для лучшей видимости точек
+            painter.fillRect(self.rect(), QColor(0, 0, 0, 40))
+        else:
+            painter.fillRect(self.rect(), QColor("#0d1117"))
         
-        # Рамка области взгляда
-        margin = 20
-        area_rect = self.rect().adjusted(margin, margin, -margin, -margin)
-        painter.setPen(QPen(QColor("#30363d"), 2))
-        painter.drawRect(area_rect)
+        # Область экрана
+        area_rect = self._get_screen_rect()
         
-        # Сетка
-        painter.setPen(QPen(QColor("#21262d"), 1))
-        for i in range(1, 4):
-            x = area_rect.left() + (area_rect.width() * i // 4)
-            painter.drawLine(x, area_rect.top(), x, area_rect.bottom())
-            y = area_rect.top() + (area_rect.height() * i // 4)
-            painter.drawLine(area_rect.left(), y, area_rect.right(), y)
+        if not self.overlay_mode:
+            # Рамка экрана (только в обычном режиме)
+            painter.setPen(QPen(QColor("#30363d"), 2))
+            painter.setBrush(QBrush(QColor("#161b22")))
+            painter.drawRect(area_rect)
+            
+            # Сетка 4x4
+            painter.setPen(QPen(QColor("#21262d"), 1))
+            for i in range(1, 4):
+                x = area_rect.left() + (area_rect.width() * i // 4)
+                painter.drawLine(x, area_rect.top(), x, area_rect.bottom())
+                y = area_rect.top() + (area_rect.height() * i // 4)
+                painter.drawLine(area_rect.left(), y, area_rect.right(), y)
         
-        # Метки
-        painter.setPen(QColor("#8b949e"))
-        painter.drawText(area_rect.left() - 15, area_rect.top() + 5, "↑")
-        painter.drawText(area_rect.left() - 15, area_rect.bottom() - 5, "↓")
-        painter.drawText(area_rect.left() + 5, area_rect.bottom() + 15, "←")
-        painter.drawText(area_rect.right() - 15, area_rect.bottom() + 15, "→")
-        
-        if not self.gaze_points:
-            painter.setPen(QColor("#8b949e"))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Нет данных")
+        if not self.gaze_points and self.current_x is None:
+            if not self.overlay_mode:
+                painter.setPen(QColor("#8b949e"))
+                painter.drawText(area_rect, Qt.AlignmentFlag.AlignCenter, "Нет данных")
             return
         
-        # Рисуем точки взгляда с градиентом по времени
+        # Рисуем историю точек (полупрозрачные)
         total = len(self.gaze_points)
         for i, (x, y, _) in enumerate(self.gaze_points):
-            # Позиция в пикселях
             px = area_rect.left() + int(x * area_rect.width())
             py = area_rect.top() + int(y * area_rect.height())
             
-            # Цвет от синего (старые) к красному (новые)
-            progress = i / total
-            r = int(88 + progress * (248 - 88))
-            g = int(166 - progress * 166)
-            b = int(255 - progress * (255 - 81))
+            progress = i / total if total > 0 else 0
             
-            color = QColor(r, g, b, 150)
+            if self.overlay_mode:
+                # Более яркие цвета для оверлея
+                r = int(100 + progress * (255 - 100))
+                g = int(200 - progress * 150)
+                b = int(255 - progress * (255 - 100))
+                alpha = 100 + int(progress * 80)
+            else:
+                r = int(88 + progress * (248 - 88))
+                g = int(166 - progress * 166)
+                b = int(255 - progress * (255 - 81))
+                alpha = 80
+            
+            color = QColor(r, g, b, alpha)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QBrush(color))
             
-            size = 4 + int(progress * 4)
+            size = 4 + int(progress * 4) if self.overlay_mode else 3 + int(progress * 3)
             painter.drawEllipse(px - size//2, py - size//2, size, size)
         
-        # Траектория
-        if len(self.gaze_points) > 1:
-            painter.setPen(QPen(QColor("#58a6ff"), 1, Qt.PenStyle.DotLine))
-            for i in range(1, min(len(self.gaze_points), 200)):
-                x1, y1, _ = self.gaze_points[i-1]
-                x2, y2, _ = self.gaze_points[i]
-                px1 = area_rect.left() + int(x1 * area_rect.width())
-                py1 = area_rect.top() + int(y1 * area_rect.height())
-                px2 = area_rect.left() + int(x2 * area_rect.width())
-                py2 = area_rect.top() + int(y2 * area_rect.height())
-                painter.drawLine(px1, py1, px2, py2)
+        # Рисуем текущую позицию взгляда (яркая, большая)
+        if self.current_x is not None and self.current_y is not None:
+            px = area_rect.left() + int(self.current_x * area_rect.width())
+            py = area_rect.top() + int(self.current_y * area_rect.height())
+            
+            if self.overlay_mode:
+                # Более заметный маркер для оверлея на видео
+                # Внешний круг (яркое свечение)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(QColor(255, 255, 0, 80)))
+                painter.drawEllipse(px - 30, py - 30, 60, 60)
+                
+                # Средний круг
+                painter.setBrush(QBrush(QColor(255, 200, 0, 150)))
+                painter.drawEllipse(px - 18, py - 18, 36, 36)
+                
+                # Центральная точка
+                painter.setBrush(QBrush(QColor("#ffcc00")))
+                painter.drawEllipse(px - 8, py - 8, 16, 16)
+                
+                # Перекрестие (белое для контраста)
+                painter.setPen(QPen(QColor(255, 255, 255, 200), 3))
+                painter.drawLine(px - 35, py, px - 12, py)
+                painter.drawLine(px + 12, py, px + 35, py)
+                painter.drawLine(px, py - 35, px, py - 12)
+                painter.drawLine(px, py + 12, px, py + 35)
+                
+                # Обводка перекрестия
+                painter.setPen(QPen(QColor(0, 0, 0, 150), 1))
+                painter.drawLine(px - 36, py, px - 11, py)
+                painter.drawLine(px + 11, py, px + 36, py)
+                painter.drawLine(px, py - 36, px, py - 11)
+                painter.drawLine(px, py + 11, px, py + 36)
+            else:
+                # Обычный маркер
+                # Внешний круг (свечение)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(QColor(248, 81, 73, 60)))
+                painter.drawEllipse(px - 20, py - 20, 40, 40)
+                
+                # Средний круг
+                painter.setBrush(QBrush(QColor(248, 81, 73, 120)))
+                painter.drawEllipse(px - 12, py - 12, 24, 24)
+                
+                # Центральная точка
+                painter.setBrush(QBrush(QColor("#f85149")))
+                painter.drawEllipse(px - 6, py - 6, 12, 12)
+                
+                # Перекрестие
+                painter.setPen(QPen(QColor("#f85149"), 2))
+                painter.drawLine(px - 25, py, px - 8, py)
+                painter.drawLine(px + 8, py, px + 25, py)
+                painter.drawLine(px, py - 25, px, py - 8)
+                painter.drawLine(px, py + 8, px, py + 25)
 
 
 class ResultsTab(QWidget):
@@ -228,6 +520,7 @@ class ResultsTab(QWidget):
         self.is_playing = False
         self.times = []
         self.attention = []
+        self.relaxation = []
         self.alpha = []
         self.beta = []
         self.theta = []
@@ -236,170 +529,188 @@ class ResultsTab(QWidget):
         self.setup_ui()
     
     def setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(24, 24, 24, 24)
+        main_layout = QVBoxLayout(self)
+        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(16, 16, 16, 16)
         
         # Header
-        header_layout = QHBoxLayout()
+        header_widget = QWidget()
+        header_widget.setFixedHeight(50)
+        header_layout = QHBoxLayout(header_widget)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        
         header = QLabel("Просмотр результатов")
-        header.setStyleSheet("font-size: 28px; font-weight: 700; color: #ffffff;")
+        header.setStyleSheet("font-size: 22px; font-weight: 700; color: #ffffff;")
         header_layout.addWidget(header)
         header_layout.addStretch()
         
         self.load_btn = QPushButton("Загрузить JSON")
-        self.load_btn.setMinimumHeight(40)
+        self.load_btn.setFixedHeight(36)
         self.load_btn.clicked.connect(self.load_json)
         header_layout.addWidget(self.load_btn)
         
         self.load_video_btn = QPushButton("Загрузить видео")
-        self.load_video_btn.setMinimumHeight(40)
+        self.load_video_btn.setFixedHeight(36)
         self.load_video_btn.setProperty("class", "secondary")
         self.load_video_btn.clicked.connect(self.load_video)
         self.load_video_btn.setEnabled(False)
         header_layout.addWidget(self.load_video_btn)
-        layout.addLayout(header_layout)
+        main_layout.addWidget(header_widget)
         
         # File info
         self.file_label = QLabel("Файл не загружен")
-        self.file_label.setStyleSheet("color: #8b949e; font-size: 14px;")
-        layout.addWidget(self.file_label)
+        self.file_label.setFixedHeight(20)
+        self.file_label.setStyleSheet("color: #8b949e; font-size: 12px;")
+        main_layout.addWidget(self.file_label)
         
-        # Main content splitter (vertical)
-        main_splitter = QSplitter(Qt.Orientation.Vertical)
+        # Scroll area for content
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         
-        # Top: Video + Gaze heatmap
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setSpacing(12)
+        scroll_layout.setContentsMargins(0, 0, 8, 0)
+        
+        # Top section: Video + Gaze heatmap side by side
         top_widget = QWidget()
+        top_widget.setFixedHeight(280)
         top_layout = QHBoxLayout(top_widget)
         top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(12)
         
         # Video player
         video_container = QFrame()
-        video_container.setStyleSheet("QFrame { background-color: #000; border: 2px solid #30363d; border-radius: 12px; }")
+        video_container.setStyleSheet("QFrame { background-color: #000; border: 1px solid #30363d; border-radius: 8px; }")
         video_layout = QVBoxLayout(video_container)
         video_layout.setContentsMargins(4, 4, 4, 4)
         video_layout.setSpacing(4)
         
         self.video_widget = QVideoWidget()
-        self.video_widget.setMinimumSize(500, 280)
+        self.video_widget.setMinimumHeight(200)
         video_layout.addWidget(self.video_widget, stretch=1)
         
-        # Controls container to prevent video overlap
+        # Video controls
         controls_widget = QWidget()
-        controls_widget.setFixedHeight(40)
-        controls_widget.setStyleSheet("background-color: transparent;")
+        controls_widget.setFixedHeight(36)
         controls_layout = QHBoxLayout(controls_widget)
-        controls_layout.setContentsMargins(4, 4, 4, 4)
-        self.play_btn = QPushButton(">")
-        self.play_btn.setFixedWidth(50)
+        controls_layout.setContentsMargins(4, 0, 4, 4)
+        controls_layout.setSpacing(8)
+        
+        self.play_btn = QPushButton("▶")
+        self.play_btn.setFixedSize(40, 28)
         self.play_btn.setEnabled(False)
         self.play_btn.clicked.connect(self.toggle_play)
+        
         self.video_slider = QSlider(Qt.Orientation.Horizontal)
         self.video_slider.setEnabled(False)
         self.video_slider.sliderMoved.connect(self.seek_video)
+        
         self.time_label = QLabel("00:00 / 00:00")
-        self.time_label.setStyleSheet("color: #8b949e; font-size: 12px;")
+        self.time_label.setFixedWidth(90)
+        self.time_label.setStyleSheet("color: #8b949e; font-size: 11px;")
+        
+        # Кнопка полноэкранного режима
+        self.fullscreen_btn = QPushButton("[ ]")
+        self.fullscreen_btn.setToolTip("Полный экран с картой взгляда")
+        self.fullscreen_btn.setFixedSize(36, 28)
+        self.fullscreen_btn.setEnabled(False)
+        self.fullscreen_btn.clicked.connect(self._open_fullscreen)
+        
         controls_layout.addWidget(self.play_btn)
-        controls_layout.addWidget(self.video_slider)
+        controls_layout.addWidget(self.video_slider, stretch=1)
         controls_layout.addWidget(self.time_label)
-        video_layout.addWidget(controls_widget, stretch=0)
+        controls_layout.addWidget(self.fullscreen_btn)
+        video_layout.addWidget(controls_widget)
         
         top_layout.addWidget(video_container, stretch=2)
         
-        # Gaze heatmap
+        # Gaze heatmap (рядом с видео в режиме превью)
         heatmap_container = QFrame()
-        heatmap_container.setStyleSheet("QFrame { background-color: #161b22; border: 2px solid #30363d; border-radius: 12px; }")
+        heatmap_container.setFixedWidth(280)
+        heatmap_container.setStyleSheet("QFrame { background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; }")
         heatmap_layout = QVBoxLayout(heatmap_container)
         heatmap_layout.setContentsMargins(8, 8, 8, 8)
+        heatmap_layout.setSpacing(4)
         
         heatmap_header = QLabel("Карта взгляда")
-        heatmap_header.setStyleSheet("font-size: 14px; font-weight: 600; color: #58a6ff;")
+        heatmap_header.setFixedHeight(20)
+        heatmap_header.setStyleSheet("font-size: 13px; font-weight: 600; color: #58a6ff;")
         heatmap_layout.addWidget(heatmap_header)
         
-        self.gaze_heatmap = GazeHeatmapWidget()
-        self.gaze_heatmap.setMinimumSize(250, 200)
-        heatmap_layout.addWidget(self.gaze_heatmap)
+        self.gaze_heatmap = GazeHeatmapWidget(overlay_mode=False)
+        heatmap_layout.addWidget(self.gaze_heatmap, stretch=1)
         
-        top_layout.addWidget(heatmap_container, stretch=1)
+        top_layout.addWidget(heatmap_container)
+        scroll_layout.addWidget(top_widget)
         
-        main_splitter.addWidget(top_widget)
-        
-        # Middle: Real-time metric cards
+        # Metric cards
         cards_widget = QWidget()
+        cards_widget.setFixedHeight(80)
         cards_layout = QHBoxLayout(cards_widget)
-        cards_layout.setContentsMargins(0, 8, 0, 8)
+        cards_layout.setContentsMargins(0, 0, 0, 0)
+        cards_layout.setSpacing(8)
         
-        self.cur_attention = MetricCard("Внимание", "--", "#58a6ff")
-        self.cur_alpha = MetricCard("Альфа", "--", "#3fb950")
-        self.cur_beta = MetricCard("Бета", "--", "#f0883e")
-        self.cur_theta = MetricCard("Тета", "--", "#d29922")
-        self.cur_gaze_x = MetricCard("Взгляд X", "--", "#a371f7")
-        self.cur_gaze_y = MetricCard("Взгляд Y", "--", "#f778ba")
+        self.cur_attention = MetricCard("Внимание", "--", "#58a6ff", size="small")
+        self.cur_relaxation = MetricCard("Расслаб.", "--", "#a371f7", size="small")
+        self.cur_alpha = MetricCard("Альфа", "--", "#3fb950", size="small")
+        self.cur_beta = MetricCard("Бета", "--", "#f0883e", size="small")
+        self.cur_theta = MetricCard("Тета", "--", "#d29922", size="small")
+        self.cur_gaze_x = MetricCard("Взгляд X", "--", "#8b949e", size="small")
+        self.cur_gaze_y = MetricCard("Взгляд Y", "--", "#8b949e", size="small")
         
-        cards_layout.addWidget(self.cur_attention)
-        cards_layout.addWidget(self.cur_alpha)
-        cards_layout.addWidget(self.cur_beta)
-        cards_layout.addWidget(self.cur_theta)
-        cards_layout.addWidget(self.cur_gaze_x)
-        cards_layout.addWidget(self.cur_gaze_y)
+        for card in [self.cur_attention, self.cur_relaxation, self.cur_alpha, self.cur_beta, self.cur_theta, self.cur_gaze_x, self.cur_gaze_y]:
+            cards_layout.addWidget(card)
+        cards_layout.addStretch()
+        scroll_layout.addWidget(cards_widget)
         
-        main_splitter.addWidget(cards_widget)
-        
-        # Bottom: Graphs
-        graphs_widget = QWidget()
-        graphs_layout = QVBoxLayout(graphs_widget)
-        graphs_layout.setContentsMargins(0, 0, 0, 0)
-        
+        # Graphs
         pg.setConfigOptions(antialias=True)
         
-        # Attention graph
-        mental_group = QGroupBox("Внимание")
+        # Attention + Relaxation graph
+        mental_group = QGroupBox("Внимание / Расслабление")
+        mental_group.setFixedHeight(150)
         mental_layout = QVBoxLayout(mental_group)
+        mental_layout.setContentsMargins(8, 20, 8, 8)
         self.mental_plot = pg.PlotWidget()
         self.mental_plot.setBackground('#161b22')
-        self.mental_plot.setMinimumHeight(100)
         self.mental_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.mental_plot.setLabel('left', 'Значение', units='%')
-        self.mental_plot.setLabel('bottom', 'Время', units='с')
-        # Vertical line for current position
         self.mental_vline = pg.InfiniteLine(angle=90, pen=pg.mkPen('#f85149', width=2))
         self.mental_plot.addItem(self.mental_vline)
         mental_layout.addWidget(self.mental_plot)
-        graphs_layout.addWidget(mental_group)
+        scroll_layout.addWidget(mental_group)
         
         # Spectral graph
-        spectral_group = QGroupBox("Спектральные данные (Альфа, Бета, Тета)")
+        spectral_group = QGroupBox("Альфа / Бета / Тета")
+        spectral_group.setFixedHeight(150)
         spectral_layout = QVBoxLayout(spectral_group)
+        spectral_layout.setContentsMargins(8, 20, 8, 8)
         self.spectral_plot = pg.PlotWidget()
         self.spectral_plot.setBackground('#161b22')
-        self.spectral_plot.setMinimumHeight(100)
         self.spectral_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.spectral_plot.setLabel('left', 'Значение', units='%')
-        self.spectral_plot.setLabel('bottom', 'Время', units='с')
         self.spectral_vline = pg.InfiniteLine(angle=90, pen=pg.mkPen('#f85149', width=2))
         self.spectral_plot.addItem(self.spectral_vline)
         spectral_layout.addWidget(self.spectral_plot)
-        graphs_layout.addWidget(spectral_group)
+        scroll_layout.addWidget(spectral_group)
         
-        # Gaze position graph
+        # Gaze graph
         gaze_group = QGroupBox("Позиция взгляда")
+        gaze_group.setFixedHeight(150)
         gaze_layout = QVBoxLayout(gaze_group)
+        gaze_layout.setContentsMargins(8, 20, 8, 8)
         self.gaze_plot = pg.PlotWidget()
         self.gaze_plot.setBackground('#161b22')
-        self.gaze_plot.setMinimumHeight(100)
         self.gaze_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.gaze_plot.setLabel('left', 'Позиция (0-1)')
-        self.gaze_plot.setLabel('bottom', 'Время', units='с')
         self.gaze_plot.setYRange(0, 1)
         self.gaze_vline = pg.InfiniteLine(angle=90, pen=pg.mkPen('#f85149', width=2))
         self.gaze_plot.addItem(self.gaze_vline)
         gaze_layout.addWidget(self.gaze_plot)
-        graphs_layout.addWidget(gaze_group)
+        scroll_layout.addWidget(gaze_group)
         
-        main_splitter.addWidget(graphs_widget)
-        main_splitter.setSizes([300, 80, 400])
-        
-        layout.addWidget(main_splitter)
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_content)
+        main_layout.addWidget(scroll, stretch=1)
         
         # Media player setup
         self.media_player = QMediaPlayer()
@@ -410,13 +721,32 @@ class ResultsTab(QWidget):
         self.media_player.durationChanged.connect(self.on_duration_changed)
         self.media_player.playbackStateChanged.connect(self.on_playback_state_changed)
         
-        # Update timer for syncing data with video
         self.sync_timer = QTimer()
         self.sync_timer.timeout.connect(self.sync_data_with_video)
         self.sync_timer.setInterval(100)
+        
+        # Диалог полноэкранного режима
+        self.fullscreen_dialog = None
+    
+    def _open_fullscreen(self):
+        """Открыть видео в полноэкранном режиме с картой взгляда"""
+        if not self.video_path:
+            return
+        self.fullscreen_dialog = ResultsFullscreenDialog(
+            self.media_player, 
+            self.data,
+            self.times,
+            self.gaze_x,
+            self.gaze_y,
+            self
+        )
+        self.fullscreen_dialog.position_changed.connect(self._on_fullscreen_position)
+    
+    def _on_fullscreen_position(self, pos_ms):
+        """Синхронизация при изменении позиции в полноэкранном режиме"""
+        self.sync_data_with_video()
     
     def load_json(self):
-        # Открываем папку reports по умолчанию
         reports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
         if not os.path.exists(reports_dir):
             reports_dir = ""
@@ -440,22 +770,22 @@ class ResultsTab(QWidget):
                 info_text += f" | Видео: {video_file}"
             
             self.file_label.setText(info_text)
-            self.file_label.setStyleSheet("color: #3fb950; font-size: 14px;")
+            self.file_label.setStyleSheet("color: #3fb950; font-size: 12px;")
             
             self.update_graphs()
             self.load_video_btn.setEnabled(True)
             
-            # Попробуем автоматически загрузить видео если путь есть
             video_path = self.json_data.get('video_path')
             if video_path and os.path.exists(video_path):
                 self.video_path = video_path
                 self.media_player.setSource(QUrl.fromLocalFile(video_path))
                 self.play_btn.setEnabled(True)
                 self.video_slider.setEnabled(True)
+                self.fullscreen_btn.setEnabled(True)
             
         except Exception as e:
             self.file_label.setText(f"Ошибка: {str(e)}")
-            self.file_label.setStyleSheet("color: #f85149; font-size: 14px;")
+            self.file_label.setStyleSheet("color: #f85149; font-size: 12px;")
     
     def load_video(self):
         filename, _ = QFileDialog.getOpenFileName(
@@ -469,6 +799,7 @@ class ResultsTab(QWidget):
         self.media_player.setSource(QUrl.fromLocalFile(filename))
         self.play_btn.setEnabled(True)
         self.video_slider.setEnabled(True)
+        self.fullscreen_btn.setEnabled(True)
     
     def toggle_play(self):
         if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -492,24 +823,24 @@ class ResultsTab(QWidget):
     
     def on_playback_state_changed(self, state):
         if state == QMediaPlayer.PlaybackState.PlayingState:
-            self.play_btn.setText("||")
+            self.play_btn.setText("⏸")
             self.sync_timer.start()
         else:
-            self.play_btn.setText(">")
+            self.play_btn.setText("▶")
             self.sync_timer.stop()
+            # Обновляем позицию взгляда при паузе
+            self.sync_data_with_video()
     
     def _format_time(self, ms):
         s = ms // 1000
         return f"{s // 60:02d}:{s % 60:02d}"
     
     def sync_data_with_video(self):
-        """Синхронизировать отображение данных с текущей позицией видео"""
         if not self.data or not self.times:
             return
         
         video_pos_ms = self.media_player.position()
         
-        # Найти ближайшую запись по video_ms
         closest_idx = 0
         min_diff = float('inf')
         for i, record in enumerate(self.data):
@@ -522,9 +853,10 @@ class ResultsTab(QWidget):
             record = self.data[closest_idx]
             elapsed = record.get('elapsed_sec', 0)
             
-            # Update metric cards
             attention_val = record.get('attention', 0)
+            relaxation_val = record.get('relaxation', 0)
             self.cur_attention.set_value(f"{attention_val:.0f}%" if attention_val else "--")
+            self.cur_relaxation.set_value(f"{relaxation_val:.0f}%" if relaxation_val else "--")
             self.cur_alpha.set_value(f"{record.get('alpha', 0)}%")
             self.cur_beta.set_value(f"{record.get('beta', 0)}%")
             self.cur_theta.set_value(f"{record.get('theta', 0)}%")
@@ -534,7 +866,12 @@ class ResultsTab(QWidget):
             self.cur_gaze_x.set_value(f"{gaze_x:.2f}" if gaze_x else "--")
             self.cur_gaze_y.set_value(f"{gaze_y:.2f}" if gaze_y else "--")
             
-            # Update vertical lines on graphs
+            # Обновляем текущую позицию взгляда на карте
+            if gaze_x and gaze_y:
+                self.gaze_heatmap.set_current_position(gaze_x, gaze_y)
+            else:
+                self.gaze_heatmap.clear_current_position()
+            
             self.mental_vline.setPos(elapsed)
             self.spectral_vline.setPos(elapsed)
             self.gaze_vline.setPos(elapsed)
@@ -543,9 +880,9 @@ class ResultsTab(QWidget):
         if not self.data:
             return
         
-        # Extract data and store in instance variables for sync
         self.times = []
         self.attention = []
+        self.relaxation = []
         self.alpha = []
         self.beta = []
         self.theta = []
@@ -556,6 +893,7 @@ class ResultsTab(QWidget):
             try:
                 self.times.append(float(row.get('elapsed_sec', 0)))
                 self.attention.append(float(row.get('attention', 0)))
+                self.relaxation.append(float(row.get('relaxation', 0)))
                 self.alpha.append(float(row.get('alpha', 0)))
                 self.beta.append(float(row.get('beta', 0)))
                 self.theta.append(float(row.get('theta', 0)))
@@ -566,28 +904,25 @@ class ResultsTab(QWidget):
             except:
                 continue
         
-        # Mental plot
         self.mental_plot.clear()
         self.mental_plot.addItem(self.mental_vline)
         if self.times:
             self.mental_plot.plot(self.times, self.attention, pen=pg.mkPen('#58a6ff', width=2), name='Внимание')
+            self.mental_plot.plot(self.times, self.relaxation, pen=pg.mkPen('#a371f7', width=2), name='Расслабление')
         
-        # Spectral plot
         self.spectral_plot.clear()
         self.spectral_plot.addItem(self.spectral_vline)
         if self.times:
-            self.spectral_plot.plot(self.times, self.alpha, pen=pg.mkPen('#3fb950', width=2), name='Альфа')
-            self.spectral_plot.plot(self.times, self.beta, pen=pg.mkPen('#f0883e', width=2), name='Бета')
-            self.spectral_plot.plot(self.times, self.theta, pen=pg.mkPen('#d29922', width=2), name='Тета')
+            self.spectral_plot.plot(self.times, self.alpha, pen=pg.mkPen('#3fb950', width=2))
+            self.spectral_plot.plot(self.times, self.beta, pen=pg.mkPen('#f0883e', width=2))
+            self.spectral_plot.plot(self.times, self.theta, pen=pg.mkPen('#d29922', width=2))
         
-        # Gaze plot
         self.gaze_plot.clear()
         self.gaze_plot.addItem(self.gaze_vline)
         if self.times:
-            self.gaze_plot.plot(self.times, self.gaze_x, pen=pg.mkPen('#a371f7', width=2), name='X')
-            self.gaze_plot.plot(self.times, self.gaze_y, pen=pg.mkPen('#f778ba', width=2), name='Y')
+            self.gaze_plot.plot(self.times, self.gaze_x, pen=pg.mkPen('#a371f7', width=2))
+            self.gaze_plot.plot(self.times, self.gaze_y, pen=pg.mkPen('#f778ba', width=2))
         
-        # Gaze heatmap
         gaze_points = [(self.gaze_x[i], self.gaze_y[i], self.times[i]) for i in range(len(self.times)) if self.gaze_x[i] > 0 or self.gaze_y[i] > 0]
         self.gaze_heatmap.set_data(gaze_points)
 
@@ -602,47 +937,89 @@ class ConnectionTab(QWidget):
         self.connect_signals()
     
     def setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(20)
-        layout.setContentsMargins(24, 24, 24, 24)
+        main_layout = QVBoxLayout(self)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
         
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content)
+        layout.setSpacing(16)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Header
         header = QLabel("Подключение BrainBit")
-        header.setStyleSheet("font-size: 28px; font-weight: 700; color: #ffffff;")
+        header.setFixedHeight(36)
+        header.setStyleSheet("font-size: 22px; font-weight: 700; color: #ffffff;")
         layout.addWidget(header)
         
         subtitle = QLabel("Найдите и подключите ваше устройство BrainBit")
-        subtitle.setStyleSheet("color: #8b949e; font-size: 14px;")
+        subtitle.setFixedHeight(20)
+        subtitle.setStyleSheet("color: #8b949e; font-size: 13px;")
         layout.addWidget(subtitle)
         
-        search_layout = QHBoxLayout()
+        # Search and disconnect buttons
+        search_widget = QWidget()
+        search_widget.setFixedHeight(50)
+        search_layout = QHBoxLayout(search_widget)
+        search_layout.setContentsMargins(0, 0, 0, 0)
+        search_layout.setSpacing(10)
         self.search_btn = QPushButton("Начать поиск")
-        self.search_btn.setMinimumHeight(44)
+        self.search_btn.setFixedHeight(40)
+        self.search_btn.setFixedWidth(200)
+        self.disconnect_btn = QPushButton("Отключить устройство")
+        self.disconnect_btn.setFixedHeight(40)
+        self.disconnect_btn.setProperty("class", "secondary")
+        self.disconnect_btn.setEnabled(False)
         search_layout.addWidget(self.search_btn)
+        search_layout.addWidget(self.disconnect_btn)
         search_layout.addStretch()
-        layout.addLayout(search_layout)
+        layout.addWidget(search_widget)
         
+        # Devices list with scroll
         devices_group = QGroupBox("Найденные устройства")
+        devices_group.setMinimumHeight(120)
+        devices_group.setMaximumHeight(200)
         devices_layout = QVBoxLayout(devices_group)
+        devices_layout.setContentsMargins(12, 24, 12, 12)
         self.devices_list = QListWidget()
-        self.devices_list.setMinimumHeight(120)
+        self.devices_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.devices_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         devices_layout.addWidget(self.devices_list)
         layout.addWidget(devices_group)
         
+        # Resistance check
         resist_group = QGroupBox("Проверка контакта электродов")
+        resist_group.setFixedHeight(140)
         resist_layout = QVBoxLayout(resist_group)
+        resist_layout.setContentsMargins(12, 24, 12, 12)
+        resist_layout.setSpacing(12)
         
-        buttons_layout = QHBoxLayout()
+        buttons_widget = QWidget()
+        buttons_widget.setFixedHeight(36)
+        buttons_layout = QHBoxLayout(buttons_widget)
+        buttons_layout.setContentsMargins(0, 0, 0, 0)
+        buttons_layout.setSpacing(8)
+        
         self.start_resist_btn = QPushButton("Начать проверку")
+        self.start_resist_btn.setFixedHeight(32)
         self.start_resist_btn.setEnabled(False)
         self.stop_resist_btn = QPushButton("Остановить")
+        self.stop_resist_btn.setFixedHeight(32)
         self.stop_resist_btn.setProperty("class", "secondary")
         self.stop_resist_btn.setEnabled(False)
         buttons_layout.addWidget(self.start_resist_btn)
         buttons_layout.addWidget(self.stop_resist_btn)
         buttons_layout.addStretch()
-        resist_layout.addLayout(buttons_layout)
+        resist_layout.addWidget(buttons_widget)
         
-        cards_layout = QHBoxLayout()
+        cards_widget = QWidget()
+        cards_widget.setFixedHeight(70)
+        cards_layout = QHBoxLayout(cards_widget)
+        cards_layout.setContentsMargins(0, 0, 0, 0)
         cards_layout.setSpacing(8)
         self.o1_card = ResistCard("O1")
         self.o2_card = ResistCard("O2")
@@ -653,41 +1030,67 @@ class ConnectionTab(QWidget):
         cards_layout.addWidget(self.t3_card)
         cards_layout.addWidget(self.t4_card)
         cards_layout.addStretch()
-        resist_layout.addLayout(cards_layout)
+        resist_layout.addWidget(cards_widget)
         layout.addWidget(resist_group)
         
+        # Calibration
         calib_group = QGroupBox("Калибровка")
+        calib_group.setFixedHeight(150)
         calib_layout = QVBoxLayout(calib_group)
+        calib_layout.setContentsMargins(12, 24, 12, 12)
+        calib_layout.setSpacing(10)
         
-        calib_buttons = QHBoxLayout()
+        calib_buttons_widget = QWidget()
+        calib_buttons_widget.setFixedHeight(36)
+        calib_buttons = QHBoxLayout(calib_buttons_widget)
+        calib_buttons.setContentsMargins(0, 0, 0, 0)
+        calib_buttons.setSpacing(8)
         self.start_calc_btn = QPushButton("Начать калибровку")
+        self.start_calc_btn.setFixedHeight(32)
         self.start_calc_btn.setEnabled(False)
         self.stop_calc_btn = QPushButton("Остановить")
+        self.stop_calc_btn.setFixedHeight(32)
         self.stop_calc_btn.setProperty("class", "secondary")
         self.stop_calc_btn.setEnabled(False)
         calib_buttons.addWidget(self.start_calc_btn)
         calib_buttons.addWidget(self.stop_calc_btn)
         calib_buttons.addStretch()
-        calib_layout.addLayout(calib_buttons)
+        calib_layout.addWidget(calib_buttons_widget)
         
-        progress_layout = QHBoxLayout()
-        progress_layout.addWidget(QLabel("Прогресс:"))
+        progress_widget = QWidget()
+        progress_widget.setFixedHeight(30)
+        progress_layout = QHBoxLayout(progress_widget)
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        progress_layout.setSpacing(8)
+        progress_label = QLabel("Прогресс:")
+        progress_label.setFixedWidth(70)
         self.calib_progress = QProgressBar()
         self.calib_progress.setValue(0)
+        progress_layout.addWidget(progress_label)
         progress_layout.addWidget(self.calib_progress)
-        calib_layout.addLayout(progress_layout)
+        calib_layout.addWidget(progress_widget)
         
-        artifact_layout = QHBoxLayout()
-        artifact_layout.addWidget(QLabel("Артефакты:"))
+        artifact_widget = QWidget()
+        artifact_widget.setFixedHeight(24)
+        artifact_layout = QHBoxLayout(artifact_widget)
+        artifact_layout.setContentsMargins(0, 0, 0, 0)
+        artifact_layout.setSpacing(8)
+        artifact_label = QLabel("Артефакты:")
+        artifact_label.setFixedWidth(70)
         self.artifact_label = QLabel("—")
+        artifact_layout.addWidget(artifact_label)
         artifact_layout.addWidget(self.artifact_label)
         artifact_layout.addStretch()
-        calib_layout.addLayout(artifact_layout)
+        calib_layout.addWidget(artifact_widget)
         layout.addWidget(calib_group)
+        
         layout.addStretch()
+        scroll.setWidget(scroll_content)
+        main_layout.addWidget(scroll)
     
     def connect_signals(self):
         self.search_btn.clicked.connect(self.start_search)
+        self.disconnect_btn.clicked.connect(self.disconnect_device)
         self.devices_list.itemClicked.connect(self.connect_to_device)
         self.start_resist_btn.clicked.connect(self.start_resist)
         self.stop_resist_btn.clicked.connect(self.stop_resist)
@@ -695,6 +1098,9 @@ class ConnectionTab(QWidget):
         self.stop_calc_btn.clicked.connect(self.stop_calc)
     
     def start_search(self):
+        # Отключаем все устройства перед поиском
+        self.disconnect_all_devices()
+        
         self.devices_list.clear()
         self.search_btn.setText("Поиск...")
         self.search_btn.setEnabled(False)
@@ -704,10 +1110,59 @@ class ConnectionTab(QWidget):
             self.devices_list.addItems([f"{s.Name} ({s.Address})" for s in sensors])
             self.search_btn.setText("Искать снова")
             self.search_btn.setEnabled(True)
-            brain_bit_controller.foundedDevices.disconnect(on_founded)
+            try:
+                brain_bit_controller.foundedDevices.disconnect(on_founded)
+            except:
+                pass
         
         brain_bit_controller.foundedDevices.connect(on_founded)
         brain_bit_controller.search_with_result(5, [])
+    
+    def disconnect_all_devices(self):
+        """Отключить все подключенные устройства"""
+        # Отключаем каждое устройство отдельно (не используем stop_all, т.к. он уничтожает сканер)
+        try:
+            for addr in list(brain_bit_controller.connected_devices):
+                try:
+                    brain_bit_controller.stop_resist(addr)
+                except:
+                    pass
+                try:
+                    brain_bit_controller.stop_calculations(addr)
+                except:
+                    pass
+                try:
+                    brain_bit_controller.disconnect_from(addr)
+                except:
+                    pass
+        except:
+            pass
+        # Сбрасываем состояние UI
+        self.start_resist_btn.setEnabled(False)
+        self.stop_resist_btn.setEnabled(False)
+        self.start_calc_btn.setEnabled(False)
+        self.stop_calc_btn.setEnabled(False)
+        self.disconnect_btn.setEnabled(False)
+        self.calib_progress.setValue(0)
+        self.artifact_label.setText("—")
+        self.artifact_label.setStyleSheet("")
+        self.o1_card.reset()
+        self.o2_card.reset()
+        self.t3_card.reset()
+        self.t4_card.reset()
+    
+    def disconnect_device(self):
+        """Отключить текущее устройство"""
+        self.disconnect_all_devices()
+        # Обновляем список устройств
+        for i in range(self.devices_list.count()):
+            item = self.devices_list.item(i)
+            if item and ": Connected" in item.text():
+                # Убираем статус подключения из текста
+                text = item.text()
+                if self._founded_sensors and i < len(self._founded_sensors):
+                    info = self._founded_sensors[i]
+                    item.setText(f"{info.Name} ({info.Address}): Disconnected")
 
     def connect_to_device(self, item):
         idx = self.devices_list.row(item)
@@ -717,9 +1172,11 @@ class ConnectionTab(QWidget):
             item.setText(f"{info.Name} ({info.Address}): {state.name}")
             if address == info.Address and state == ConnectionState.Connected:
                 self.start_resist_btn.setEnabled(True)
+                self.disconnect_btn.setEnabled(True)
             elif address == info.Address and state == ConnectionState.Disconnected:
                 self.start_resist_btn.setEnabled(False)
                 self.start_calc_btn.setEnabled(False)
+                self.disconnect_btn.setEnabled(False)
         
         brain_bit_controller.connectionStateChanged.connect(on_connected)
         brain_bit_controller.connect_to(info=info, need_reconnect=True)
@@ -765,12 +1222,25 @@ class ConnectionTab(QWidget):
         def on_progress(address, progress):
             if address == addr:
                 self.calib_progress.setValue(progress)
+                # Автоматически завершаем калибровку при 100%
+                if progress >= 100:
+                    QTimer.singleShot(500, self._on_calibration_complete)
         
         brain_bit_controller.isArtefacted.connect(on_artifact)
         brain_bit_controller.calibrationProcessChanged.connect(on_progress)
         brain_bit_controller.start_calculations(addr)
         self.start_calc_btn.setEnabled(False)
         self.stop_calc_btn.setEnabled(True)
+    
+    def _on_calibration_complete(self):
+        """Вызывается когда калибровка завершена"""
+        self.stop_calc()
+        self.calib_progress.setStyleSheet("""
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #238636, stop:1 #3fb950);
+            }
+        """)
 
     def stop_calc(self):
         try:
@@ -790,6 +1260,7 @@ class MonitoringTab(QWidget):
         super().__init__()
         self.data_points = 100
         self.attention_data = deque([0] * self.data_points, maxlen=self.data_points)
+        self.relaxation_data = deque([0] * self.data_points, maxlen=self.data_points)
         self.alpha_data = deque([0] * self.data_points, maxlen=self.data_points)
         self.beta_data = deque([0] * self.data_points, maxlen=self.data_points)
         self.theta_data = deque([0] * self.data_points, maxlen=self.data_points)
@@ -798,33 +1269,49 @@ class MonitoringTab(QWidget):
         self.connect_signals()
     
     def setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(16)
-        layout.setContentsMargins(24, 24, 24, 24)
+        main_layout = QVBoxLayout(self)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
         
-        header_layout = QHBoxLayout()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content)
+        layout.setSpacing(12)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Header
+        header_widget = QWidget()
+        header_widget.setFixedHeight(44)
+        header_layout = QHBoxLayout(header_widget)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        
         header = QLabel("Мониторинг в реальном времени")
-        header.setStyleSheet("font-size: 28px; font-weight: 700; color: #ffffff;")
+        header.setStyleSheet("font-size: 22px; font-weight: 700; color: #ffffff;")
         header_layout.addWidget(header)
         header_layout.addStretch()
         
         self.start_monitor_btn = QPushButton("Начать")
-        self.start_monitor_btn.setMinimumHeight(40)
+        self.start_monitor_btn.setFixedHeight(36)
         self.stop_monitor_btn = QPushButton("Стоп")
+        self.stop_monitor_btn.setFixedHeight(36)
         self.stop_monitor_btn.setProperty("class", "secondary")
         self.stop_monitor_btn.setEnabled(False)
         header_layout.addWidget(self.start_monitor_btn)
         header_layout.addWidget(self.stop_monitor_btn)
-        layout.addLayout(header_layout)
+        layout.addWidget(header_widget)
         
-        # Предупреждение о контакте электродов
+        # Warning
         self.electrode_warning = QLabel("")
+        self.electrode_warning.setFixedHeight(40)
         self.electrode_warning.setStyleSheet("""
             QLabel {
                 background-color: #da363322;
                 border: 1px solid #da3633;
-                border-radius: 8px;
-                padding: 12px;
+                border-radius: 6px;
+                padding: 8px;
                 color: #f85149;
                 font-weight: 600;
             }
@@ -832,48 +1319,66 @@ class MonitoringTab(QWidget):
         self.electrode_warning.setVisible(False)
         layout.addWidget(self.electrode_warning)
         
-        # Статус электродов
-        electrode_layout = QHBoxLayout()
+        # Electrode status
+        electrode_widget = QWidget()
+        electrode_widget.setFixedHeight(24)
+        electrode_layout = QHBoxLayout(electrode_widget)
+        electrode_layout.setContentsMargins(0, 0, 0, 0)
+        electrode_layout.setSpacing(4)
+        
         electrode_layout.addWidget(QLabel("Электроды:"))
         self.o1_status = QLabel("O1: —")
         self.o2_status = QLabel("O2: —")
         self.t3_status = QLabel("T3: —")
         self.t4_status = QLabel("T4: —")
         for lbl in [self.o1_status, self.o2_status, self.t3_status, self.t4_status]:
-            lbl.setStyleSheet("color: #8b949e; font-size: 12px; margin: 0 8px;")
+            lbl.setStyleSheet("color: #8b949e; font-size: 12px; margin: 0 6px;")
             electrode_layout.addWidget(lbl)
         electrode_layout.addStretch()
-        layout.addLayout(electrode_layout)
+        layout.addWidget(electrode_widget)
         
-        cards_layout = QHBoxLayout()
+        # Metric cards
+        cards_widget = QWidget()
+        cards_widget.setFixedHeight(90)
+        cards_layout = QHBoxLayout(cards_widget)
+        cards_layout.setContentsMargins(0, 0, 0, 0)
+        cards_layout.setSpacing(10)
         self.attention_card = MetricCard("Внимание", "0%", "#58a6ff")
+        self.relaxation_card = MetricCard("Расслабление", "0%", "#a371f7")
         self.alpha_card = MetricCard("Альфа", "0%", "#3fb950")
         self.beta_card = MetricCard("Бета", "0%", "#f0883e")
         self.theta_card = MetricCard("Тета", "0%", "#d29922")
         cards_layout.addWidget(self.attention_card)
+        cards_layout.addWidget(self.relaxation_card)
         cards_layout.addWidget(self.alpha_card)
         cards_layout.addWidget(self.beta_card)
         cards_layout.addWidget(self.theta_card)
-        layout.addLayout(cards_layout)
+        cards_layout.addStretch()
+        layout.addWidget(cards_widget)
         
         pg.setConfigOptions(antialias=True)
         
-        mental_group = QGroupBox("Внимание")
+        # Attention + Relaxation graph
+        mental_group = QGroupBox("Внимание / Расслабление")
+        mental_group.setMinimumHeight(180)
         mental_layout = QVBoxLayout(mental_group)
+        mental_layout.setContentsMargins(8, 24, 8, 8)
         self.mental_plot = pg.PlotWidget()
         self.mental_plot.setBackground('#161b22')
-        self.mental_plot.setMinimumHeight(160)
         self.mental_plot.showGrid(x=True, y=True, alpha=0.3)
         self.mental_plot.setYRange(0, 100)
         self.attention_curve = self.mental_plot.plot(pen=pg.mkPen('#58a6ff', width=2))
+        self.relaxation_curve = self.mental_plot.plot(pen=pg.mkPen('#a371f7', width=2))
         mental_layout.addWidget(self.mental_plot)
         layout.addWidget(mental_group)
         
+        # Spectral graph
         spectral_group = QGroupBox("Спектральные данные")
+        spectral_group.setMinimumHeight(180)
         spectral_layout = QVBoxLayout(spectral_group)
+        spectral_layout.setContentsMargins(8, 24, 8, 8)
         self.spectral_plot = pg.PlotWidget()
         self.spectral_plot.setBackground('#161b22')
-        self.spectral_plot.setMinimumHeight(160)
         self.spectral_plot.showGrid(x=True, y=True, alpha=0.3)
         self.spectral_plot.setYRange(0, 100)
         self.alpha_curve = self.spectral_plot.plot(pen=pg.mkPen('#3fb950', width=2))
@@ -881,6 +1386,10 @@ class MonitoringTab(QWidget):
         self.theta_curve = self.spectral_plot.plot(pen=pg.mkPen('#d29922', width=2))
         spectral_layout.addWidget(self.spectral_plot)
         layout.addWidget(spectral_group)
+        
+        layout.addStretch()
+        scroll.setWidget(scroll_content)
+        main_layout.addWidget(scroll)
         
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.update_plots)
@@ -895,11 +1404,12 @@ class MonitoringTab(QWidget):
         self.is_monitoring = True
         addr = brain_bit_controller.connected_devices[0]
         
-        # Используем данные без калибровки для мгновенного отображения
         def on_inst_mind(address, data):
             if address == addr and self.is_monitoring:
                 self.attention_data.append(data.attention)
+                self.relaxation_data.append(data.relaxation)
                 self.attention_card.set_value(f"{data.attention:.0f}%")
+                self.relaxation_card.set_value(f"{data.relaxation:.0f}%")
         
         def on_spec(address, data):
             if address == addr and self.is_monitoring:
@@ -927,48 +1437,6 @@ class MonitoringTab(QWidget):
         self.start_monitor_btn.setEnabled(False)
         self.stop_monitor_btn.setEnabled(True)
     
-    def _update_electrode_status(self, values):
-        """Обновить статус электродов"""
-        bad_electrodes = []
-        
-        if values.O1.name == "Normal":
-            self.o1_status.setText("O1: OK")
-            self.o1_status.setStyleSheet("color: #3fb950; font-size: 12px; margin: 0 8px;")
-        else:
-            self.o1_status.setText("O1: X")
-            self.o1_status.setStyleSheet("color: #f85149; font-size: 12px; margin: 0 8px;")
-            bad_electrodes.append("O1")
-        
-        if values.O2.name == "Normal":
-            self.o2_status.setText("O2: OK")
-            self.o2_status.setStyleSheet("color: #3fb950; font-size: 12px; margin: 0 8px;")
-        else:
-            self.o2_status.setText("O2: X")
-            self.o2_status.setStyleSheet("color: #f85149; font-size: 12px; margin: 0 8px;")
-            bad_electrodes.append("O2")
-        
-        if values.T3.name == "Normal":
-            self.t3_status.setText("T3: OK")
-            self.t3_status.setStyleSheet("color: #3fb950; font-size: 12px; margin: 0 8px;")
-        else:
-            self.t3_status.setText("T3: X")
-            self.t3_status.setStyleSheet("color: #f85149; font-size: 12px; margin: 0 8px;")
-            bad_electrodes.append("T3")
-        
-        if values.T4.name == "Normal":
-            self.t4_status.setText("T4: OK")
-            self.t4_status.setStyleSheet("color: #3fb950; font-size: 12px; margin: 0 8px;")
-        else:
-            self.t4_status.setText("T4: X")
-            self.t4_status.setStyleSheet("color: #f85149; font-size: 12px; margin: 0 8px;")
-            bad_electrodes.append("T4")
-        
-        if bad_electrodes:
-            self.electrode_warning.setText(f"Плохой контакт электродов: {', '.join(bad_electrodes)}. Поправьте устройство!")
-            self.electrode_warning.setVisible(True)
-        else:
-            self.electrode_warning.setVisible(False)
-    
     def stop_monitoring(self):
         self.is_monitoring = False
         self.update_timer.stop()
@@ -987,6 +1455,7 @@ class MonitoringTab(QWidget):
     def update_plots(self):
         x = list(range(self.data_points))
         self.attention_curve.setData(x, list(self.attention_data))
+        self.relaxation_curve.setData(x, list(self.relaxation_data))
         self.alpha_curve.setData(x, list(self.alpha_data))
         self.beta_curve.setData(x, list(self.beta_data))
         self.theta_curve.setData(x, list(self.theta_data))
@@ -998,12 +1467,12 @@ class VideoRecordingTab(QWidget):
         super().__init__()
         self.is_recording = False
         self.recording_start_time = None
-        self.record_data = []  # Список записей для JSON
+        self.record_data = []
         self.record_count_value = 0
         self.current_brain_data = {}
         self.current_gaze_data = None
         self.video_loaded = False
-        self.video_file_path = None  # Путь к видеофайлу для сохранения в JSON
+        self.video_file_path = None
         self.camera_active = False
         self.fullscreen_dialog = None
         self.reports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
@@ -1011,127 +1480,163 @@ class VideoRecordingTab(QWidget):
         self.connect_signals()
     
     def setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(24, 24, 24, 24)
+        main_layout = QVBoxLayout(self)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
         
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content)
+        layout.setSpacing(12)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Header
         header = QLabel("Видео + Трекинг взгляда + Запись")
-        header.setStyleSheet("font-size: 28px; font-weight: 700; color: #ffffff;")
+        header.setFixedHeight(32)
+        header.setStyleSheet("font-size: 22px; font-weight: 700; color: #ffffff;")
         layout.addWidget(header)
         
-        content_splitter = QSplitter(Qt.Orientation.Horizontal)
+        # Top section: Video + Camera
+        top_widget = QWidget()
+        top_widget.setFixedHeight(300)
+        top_layout = QHBoxLayout(top_widget)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(12)
         
         # Video player
         video_container = QFrame()
-        video_container.setStyleSheet("QFrame { background-color: #000; border: 2px solid #30363d; border-radius: 12px; }")
+        video_container.setStyleSheet("QFrame { background-color: #000; border: 1px solid #30363d; border-radius: 8px; }")
         video_layout = QVBoxLayout(video_container)
-        video_layout.setContentsMargins(4, 4, 4, 4)
+        video_layout.setContentsMargins(6, 6, 6, 6)
+        video_layout.setSpacing(4)
         
-        video_file_layout = QHBoxLayout()
+        # Video file select
+        video_file_widget = QWidget()
+        video_file_widget.setFixedHeight(28)
+        video_file_layout = QHBoxLayout(video_file_widget)
+        video_file_layout.setContentsMargins(0, 0, 0, 0)
+        video_file_layout.setSpacing(6)
+        
         self.video_path_label = QLabel("Видео не выбрано")
-        self.video_path_label.setStyleSheet("color: #8b949e; font-size: 12px;")
+        self.video_path_label.setStyleSheet("color: #8b949e; font-size: 11px;")
         self.select_video_btn = QPushButton("MP4")
         self.select_video_btn.setProperty("class", "secondary")
-        self.select_video_btn.setFixedWidth(80)
+        self.select_video_btn.setFixedSize(60, 24)
         self.fullscreen_btn = QPushButton("[ ]")
         self.fullscreen_btn.setToolTip("Полный экран (F)")
-        self.fullscreen_btn.setFixedWidth(40)
+        self.fullscreen_btn.setFixedSize(32, 24)
         self.fullscreen_btn.setEnabled(False)
         video_file_layout.addWidget(self.video_path_label, stretch=1)
         video_file_layout.addWidget(self.select_video_btn)
         video_file_layout.addWidget(self.fullscreen_btn)
-        video_layout.addLayout(video_file_layout)
+        video_layout.addWidget(video_file_widget)
         
         self.video_widget = QVideoWidget()
-        self.video_widget.setMinimumSize(400, 225)
-        video_layout.addWidget(self.video_widget)
+        video_layout.addWidget(self.video_widget, stretch=1)
         
-        controls_layout = QHBoxLayout()
+        # Video controls
+        controls_widget = QWidget()
+        controls_widget.setFixedHeight(32)
+        controls_layout = QHBoxLayout(controls_widget)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(6)
         self.play_btn = QPushButton("▶")
-        self.play_btn.setFixedWidth(50)
+        self.play_btn.setFixedSize(36, 26)
         self.play_btn.setEnabled(False)
         self.video_slider = QSlider(Qt.Orientation.Horizontal)
         self.video_slider.setEnabled(False)
         self.time_label = QLabel("00:00 / 00:00")
-        self.time_label.setStyleSheet("color: #8b949e; font-size: 12px;")
+        self.time_label.setFixedWidth(85)
+        self.time_label.setStyleSheet("color: #8b949e; font-size: 11px;")
         controls_layout.addWidget(self.play_btn)
-        controls_layout.addWidget(self.video_slider)
+        controls_layout.addWidget(self.video_slider, stretch=1)
         controls_layout.addWidget(self.time_label)
-        video_layout.addLayout(controls_layout)
+        video_layout.addWidget(controls_widget)
         
-        content_splitter.addWidget(video_container)
+        top_layout.addWidget(video_container, stretch=3)
         
         # Camera
         camera_container = QFrame()
-        camera_container.setStyleSheet("QFrame { background-color: #161b22; border: 2px solid #30363d; border-radius: 12px; }")
+        camera_container.setFixedWidth(320)
+        camera_container.setStyleSheet("QFrame { background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; }")
         camera_layout = QVBoxLayout(camera_container)
         camera_layout.setContentsMargins(8, 8, 8, 8)
+        camera_layout.setSpacing(6)
         
         cam_header = QLabel("Трекинг взгляда")
-        cam_header.setStyleSheet("font-size: 14px; font-weight: 600; color: #58a6ff;")
+        cam_header.setFixedHeight(20)
+        cam_header.setStyleSheet("font-size: 13px; font-weight: 600; color: #58a6ff;")
         camera_layout.addWidget(cam_header)
         
         self.camera_label = QLabel("Камера запустится при записи")
-        self.camera_label.setMinimumSize(320, 240)
+        self.camera_label.setMinimumHeight(160)
         self.camera_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.camera_label.setStyleSheet("background-color: #0d1117; border-radius: 8px; color: #8b949e;")
-        camera_layout.addWidget(self.camera_label)
+        self.camera_label.setStyleSheet("background-color: #0d1117; border-radius: 6px; color: #8b949e;")
+        camera_layout.addWidget(self.camera_label, stretch=1)
         
-        gaze_info = QHBoxLayout()
+        gaze_widget = QWidget()
+        gaze_widget.setFixedHeight(22)
+        gaze_info = QHBoxLayout(gaze_widget)
+        gaze_info.setContentsMargins(0, 0, 0, 0)
+        gaze_info.setSpacing(8)
         self.gaze_direction_label = QLabel("Направление: —")
-        self.gaze_direction_label.setStyleSheet("color: #e6edf3; font-size: 12px;")
+        self.gaze_direction_label.setStyleSheet("color: #e6edf3; font-size: 11px;")
         self.eyes_status_label = QLabel("Глаза: —")
-        self.eyes_status_label.setStyleSheet("color: #e6edf3; font-size: 12px;")
+        self.eyes_status_label.setStyleSheet("color: #e6edf3; font-size: 11px;")
         gaze_info.addWidget(self.gaze_direction_label)
         gaze_info.addWidget(self.eyes_status_label)
-        camera_layout.addLayout(gaze_info)
+        gaze_info.addStretch()
+        camera_layout.addWidget(gaze_widget)
         
-        # Статус калибровки
-        self.calibration_status = QLabel("Не откалибровано")
-        self.calibration_status.setStyleSheet("color: #8b949e; font-size: 11px;")
-        camera_layout.addWidget(self.calibration_status)
-        
-        cam_controls = QHBoxLayout()
-        self.start_camera_btn = QPushButton("Тест камеры")
+        cam_controls_widget = QWidget()
+        cam_controls_widget.setFixedHeight(30)
+        cam_controls = QHBoxLayout(cam_controls_widget)
+        cam_controls.setContentsMargins(0, 0, 0, 0)
+        cam_controls.setSpacing(4)
+        self.start_camera_btn = QPushButton("Тест")
         self.start_camera_btn.setProperty("class", "secondary")
+        self.start_camera_btn.setFixedHeight(26)
         self.calibrate_btn = QPushButton("Калибровка")
-        self.calibrate_btn.setToolTip("Калибровка взгляда по точкам экрана")
+        self.calibrate_btn.setFixedHeight(26)
         self.calibrate_btn.setEnabled(False)
         self.stop_camera_btn = QPushButton("Стоп")
         self.stop_camera_btn.setProperty("class", "secondary")
+        self.stop_camera_btn.setFixedSize(50, 26)
         self.stop_camera_btn.setEnabled(False)
-        self.stop_camera_btn.setFixedWidth(60)
         cam_controls.addWidget(self.start_camera_btn)
         cam_controls.addWidget(self.calibrate_btn)
         cam_controls.addWidget(self.stop_camera_btn)
-        camera_layout.addLayout(cam_controls)
+        camera_layout.addWidget(cam_controls_widget)
         
-        # Статус калибровки
         self.calibration_status = QLabel("Требуется калибровка")
+        self.calibration_status.setFixedHeight(28)
         self.calibration_status.setStyleSheet("""
             QLabel {
                 background-color: #da363322;
                 border: 1px solid #da3633;
-                border-radius: 6px;
-                padding: 6px 10px;
+                border-radius: 4px;
+                padding: 4px 8px;
                 color: #f85149;
-                font-size: 12px;
+                font-size: 11px;
             }
         """)
         camera_layout.addWidget(self.calibration_status)
         
-        content_splitter.addWidget(camera_container)
-        content_splitter.setSizes([550, 400])
-        layout.addWidget(content_splitter)
+        top_layout.addWidget(camera_container)
+        layout.addWidget(top_widget)
         
-        # Предупреждение об электродах
+        # Warning
         self.electrode_warning = QLabel("")
+        self.electrode_warning.setFixedHeight(36)
         self.electrode_warning.setStyleSheet("""
             QLabel {
                 background-color: #da363322;
                 border: 1px solid #da3633;
-                border-radius: 8px;
-                padding: 10px;
+                border-radius: 6px;
+                padding: 8px;
                 color: #f85149;
                 font-weight: 600;
             }
@@ -1139,38 +1644,48 @@ class VideoRecordingTab(QWidget):
         self.electrode_warning.setVisible(False)
         layout.addWidget(self.electrode_warning)
         
-        # Recording
+        # Recording section
         record_group = QGroupBox("Запись")
+        record_group.setFixedHeight(200)
         record_layout = QVBoxLayout(record_group)
+        record_layout.setContentsMargins(12, 24, 12, 12)
+        record_layout.setSpacing(10)
         
-        output_layout = QHBoxLayout()
-        self.output_path_label = QLabel(f"Отчёты сохраняются в: reports/")
-        self.output_path_label.setStyleSheet("color: #8b949e;")
-        output_layout.addWidget(self.output_path_label, stretch=1)
-        record_layout.addLayout(output_layout)
+        self.output_path_label = QLabel("Отчёты сохраняются в: reports/")
+        self.output_path_label.setFixedHeight(18)
+        self.output_path_label.setStyleSheet("color: #8b949e; font-size: 12px;")
+        record_layout.addWidget(self.output_path_label)
         
-        buttons_layout = QHBoxLayout()
+        buttons_widget = QWidget()
+        buttons_widget.setFixedHeight(50)
+        buttons_layout = QHBoxLayout(buttons_widget)
+        buttons_layout.setContentsMargins(0, 0, 0, 0)
+        buttons_layout.setSpacing(10)
+        
         self.start_record_btn = QPushButton("НАЧАТЬ ЗАПИСЬ")
         self.start_record_btn.setStyleSheet("""
-            QPushButton { background-color: #da3633; color: white; font-weight: 700; font-size: 16px; }
+            QPushButton { background-color: #da3633; color: white; font-weight: 700; font-size: 14px; }
             QPushButton:hover { background-color: #f85149; }
             QPushButton:disabled { background-color: #21262d; color: #484f58; }
         """)
-        self.start_record_btn.setMinimumHeight(50)
+        self.start_record_btn.setFixedHeight(44)
         
         self.stop_record_btn = QPushButton("СТОП")
         self.stop_record_btn.setStyleSheet("""
             QPushButton { background-color: #21262d; border: 2px solid #da3633; color: #da3633; font-weight: 700; }
             QPushButton:disabled { border-color: #484f58; color: #484f58; }
         """)
-        self.stop_record_btn.setMinimumHeight(50)
+        self.stop_record_btn.setFixedHeight(44)
         self.stop_record_btn.setEnabled(False)
         
         buttons_layout.addWidget(self.start_record_btn)
         buttons_layout.addWidget(self.stop_record_btn)
-        record_layout.addLayout(buttons_layout)
+        record_layout.addWidget(buttons_widget)
         
-        status_layout = QHBoxLayout()
+        status_widget = QWidget()
+        status_widget.setFixedHeight(22)
+        status_layout = QHBoxLayout(status_widget)
+        status_layout.setContentsMargins(0, 0, 0, 0)
         self.record_status = QLabel("Готов")
         self.record_status.setStyleSheet("font-weight: 600;")
         self.record_count = QLabel("Записей: 0")
@@ -1178,18 +1693,29 @@ class VideoRecordingTab(QWidget):
         status_layout.addWidget(self.record_status)
         status_layout.addStretch()
         status_layout.addWidget(self.record_count)
-        record_layout.addLayout(status_layout)
+        record_layout.addWidget(status_widget)
         
-        values_layout = QHBoxLayout()
-        self.rec_attention = MetricCard("Внимание", "—", "#58a6ff")
-        self.rec_gaze_x = MetricCard("Взгляд X", "—", "#3fb950")
-        self.rec_gaze_y = MetricCard("Взгляд Y", "—", "#f0883e")
+        values_widget = QWidget()
+        values_widget.setFixedHeight(70)
+        values_layout = QHBoxLayout(values_widget)
+        values_layout.setContentsMargins(0, 0, 0, 0)
+        values_layout.setSpacing(8)
+        self.rec_attention = MetricCard("Внимание", "—", "#58a6ff", size="small")
+        self.rec_relaxation = MetricCard("Расслаб.", "—", "#a371f7", size="small")
+        self.rec_gaze_x = MetricCard("Взгляд X", "—", "#8b949e", size="small")
+        self.rec_gaze_y = MetricCard("Взгляд Y", "—", "#8b949e", size="small")
         values_layout.addWidget(self.rec_attention)
+        values_layout.addWidget(self.rec_relaxation)
         values_layout.addWidget(self.rec_gaze_x)
         values_layout.addWidget(self.rec_gaze_y)
-        record_layout.addLayout(values_layout)
+        values_layout.addStretch()
+        record_layout.addWidget(values_widget)
         
         layout.addWidget(record_group)
+        layout.addStretch()
+        
+        scroll.setWidget(scroll_content)
+        main_layout.addWidget(scroll)
         
         self.media_player = QMediaPlayer()
         self.audio_output = QAudioOutput()
@@ -1223,9 +1749,9 @@ class VideoRecordingTab(QWidget):
     def select_video(self):
         filename, _ = QFileDialog.getOpenFileName(self, "Выбрать видео", "", "Видео (*.mp4 *.avi *.mkv *.mov)")
         if filename:
-            self.video_file_path = filename  # Сохраняем путь для JSON
+            self.video_file_path = filename
             self.video_path_label.setText(os.path.basename(filename))
-            self.video_path_label.setStyleSheet("color: #3fb950; font-size: 12px;")
+            self.video_path_label.setStyleSheet("color: #3fb950; font-size: 11px;")
             self.media_player.setSource(QUrl.fromLocalFile(filename))
             self.video_loaded = True
             self.play_btn.setEnabled(True)
@@ -1277,17 +1803,16 @@ class VideoRecordingTab(QWidget):
         self.calibrate_btn.setEnabled(True)
         self.stop_camera_btn.setEnabled(True)
         self.camera_label.setText("")
-        # Обновляем статус калибровки
         if eye_tracker.is_calibrated:
             self.calibration_status.setText("Калибровка выполнена")
             self.calibration_status.setStyleSheet("""
                 QLabel {
                     background-color: #23863622;
                     border: 1px solid #238636;
-                    border-radius: 6px;
-                    padding: 6px 10px;
+                    border-radius: 4px;
+                    padding: 4px 8px;
                     color: #3fb950;
-                    font-size: 12px;
+                    font-size: 11px;
                 }
             """)
         else:
@@ -1296,10 +1821,10 @@ class VideoRecordingTab(QWidget):
                 QLabel {
                     background-color: #da363322;
                     border: 1px solid #da3633;
-                    border-radius: 6px;
-                    padding: 6px 10px;
+                    border-radius: 4px;
+                    padding: 4px 8px;
                     color: #f85149;
-                    font-size: 12px;
+                    font-size: 11px;
                 }
             """)
     
@@ -1314,17 +1839,13 @@ class VideoRecordingTab(QWidget):
         self.eyes_status_label.setText("Глаза: —")
     
     def start_calibration(self):
-        """Запуск калибровки взгляда"""
         if not eye_tracker.is_running:
             return
-        
-        # Создаём диалог калибровки
         self.calibration_dialog = CalibrationDialog(eye_tracker, self)
         self.calibration_dialog.calibration_complete.connect(self.on_calibration_complete)
         self.calibration_dialog.start_calibration()
     
     def on_calibration_complete(self, calibration_data):
-        """Обработка завершения калибровки"""
         if calibration_data:
             eye_tracker.set_calibration(calibration_data)
             self.calibration_status.setText("Калибровка выполнена")
@@ -1332,10 +1853,10 @@ class VideoRecordingTab(QWidget):
                 QLabel {
                     background-color: #23863622;
                     border: 1px solid #238636;
-                    border-radius: 6px;
-                    padding: 6px 10px;
+                    border-radius: 4px;
+                    padding: 4px 8px;
                     color: #3fb950;
-                    font-size: 12px;
+                    font-size: 11px;
                 }
             """)
         else:
@@ -1344,10 +1865,10 @@ class VideoRecordingTab(QWidget):
                 QLabel {
                     background-color: #da363322;
                     border: 1px solid #da3633;
-                    border-radius: 6px;
-                    padding: 6px 10px;
+                    border-radius: 4px;
+                    padding: 4px 8px;
                     color: #f85149;
-                    font-size: 12px;
+                    font-size: 11px;
                 }
             """)
     
@@ -1375,24 +1896,21 @@ class VideoRecordingTab(QWidget):
             self.gaze_direction_label.setText(f"Направление: {gaze.horizontal_direction}/{gaze.vertical_direction}")
             self.eyes_status_label.setText(f"Глаза: L:{'O' if gaze.left_eye_open else 'C'} R:{'O' if gaze.right_eye_open else 'C'}")
             if self.is_recording:
-                # Используем калиброванные координаты экрана
                 self.rec_gaze_x.set_value(f"{gaze.screen_x:.2f}")
                 self.rec_gaze_y.set_value(f"{gaze.screen_y:.2f}")
         except Exception:
             pass
     
     def _check_ready(self):
-        # Кнопка записи всегда доступна (файл сохраняется автоматически)
         self.start_record_btn.setEnabled(True)
     
     def start_recording(self):
-        # Проверяем калибровку трекинга взгляда
         if not eye_tracker.is_calibrated:
             msg = QMessageBox(self)
             msg.setIcon(QMessageBox.Icon.Warning)
             msg.setWindowTitle("Требуется калибровка")
             msg.setText("Трекинг взгляда не откалиброван!")
-            msg.setInformativeText("Сначала включите камеру и выполните калибровку (кнопка Калибровка).")
+            msg.setInformativeText("Сначала включите камеру и выполните калибровку.")
             msg.setStandardButtons(QMessageBox.StandardButton.Ok)
             msg.setStyleSheet("""
                 QMessageBox { background-color: #161b22; }
@@ -1402,36 +1920,33 @@ class VideoRecordingTab(QWidget):
             msg.exec()
             return
         
-        # Создаём папку reports если её нет
         if not os.path.exists(self.reports_dir):
             os.makedirs(self.reports_dir)
         
-        # Запускаем камеру если не запущена
         if not eye_tracker.is_running:
             eye_tracker.start(0)
         
-        # Запускаем видео с начала
         if self.video_loaded:
             self.media_player.setPosition(0)
             self.media_player.play()
-            # Открываем полноэкранный режим с индикатором записи
             self.fullscreen_dialog = FullscreenVideoDialog(self.media_player, self, is_recording=True)
         
         self.is_recording = True
         self.recording_start_time = datetime.now()
         self.record_count_value = 0
-        self.record_data = []  # Очищаем данные для новой записи
+        self.record_data = []
         
-        self.current_brain_data = {'attention': 0, 'alpha': 0, 'beta': 0, 'theta': 0}
+        self.current_brain_data = {'attention': 0, 'relaxation': 0, 'alpha': 0, 'beta': 0, 'theta': 0}
         
         if brain_bit_controller.connected_devices:
             addr = brain_bit_controller.connected_devices[0]
             
-            # Используем данные без калибровки для мгновенного отображения
             def on_inst_mind(address, data):
                 if address == addr and self.is_recording:
                     self.current_brain_data['attention'] = data.attention
+                    self.current_brain_data['relaxation'] = data.relaxation
                     self.rec_attention.set_value(f"{data.attention:.0f}%")
+                    self.rec_relaxation.set_value(f"{data.relaxation:.0f}%")
             
             def on_spec(address, data):
                 if address == addr and self.is_recording:
@@ -1441,11 +1956,9 @@ class VideoRecordingTab(QWidget):
             
             def on_artifact(address, is_art):
                 if address == addr and self.is_recording:
-                    # Показываем предупреждение в полноэкранном режиме
                     if self.fullscreen_dialog and self.fullscreen_dialog.isVisible():
                         self.fullscreen_dialog.show_electrode_warning(is_art)
                     else:
-                        # Показываем в основном окне
                         if is_art:
                             self.electrode_warning.setText("Артефакты! Проверьте контакт электродов.")
                             self.electrode_warning.setVisible(True)
@@ -1476,6 +1989,7 @@ class VideoRecordingTab(QWidget):
             'elapsed_sec': round(elapsed, 2),
             'video_ms': video_pos,
             'attention': self.current_brain_data.get('attention', 0),
+            'relaxation': self.current_brain_data.get('relaxation', 0),
             'alpha': self.current_brain_data.get('alpha', 0),
             'beta': self.current_brain_data.get('beta', 0),
             'theta': self.current_brain_data.get('theta', 0),
@@ -1492,28 +2006,19 @@ class VideoRecordingTab(QWidget):
         self.record_count.setText(f"Записей: {self.record_count_value}")
     
     def stop_recording(self):
-        # Сначала останавливаем таймер и флаг
         self.is_recording = False
         self.record_timer.stop()
         
-        # Скрываем предупреждение
         self.electrode_warning.setVisible(False)
         
-        # Закрываем полноэкранный режим если открыт
         if self.fullscreen_dialog and self.fullscreen_dialog.isVisible():
             self.fullscreen_dialog.close()
             self.fullscreen_dialog = None
         
-        # Останавливаем видео
         self.media_player.pause()
-        
-        # Сбрасываем флаг камеры перед остановкой
         self.camera_active = False
-        
-        # Останавливаем трекинг
         eye_tracker.stop()
         
-        # Отключаем сигналы BrainBit
         try:
             brain_bit_controller.mindDataWithoutCalibrationUpdated.disconnect()
             brain_bit_controller.spectralDataUpdated.disconnect()
@@ -1527,7 +2032,6 @@ class VideoRecordingTab(QWidget):
             except:
                 pass
 
-        # Сохраняем данные в JSON файл
         if self.record_data:
             filename = f"report_{self.recording_start_time.strftime('%Y%m%d_%H%M%S')}.json"
             filepath = os.path.join(self.reports_dir, filename)
@@ -1545,10 +2049,10 @@ class VideoRecordingTab(QWidget):
                 with open(filepath, 'w', encoding='utf-8') as f:
                     json.dump(report, f, ensure_ascii=False, indent=2)
                 self.output_path_label.setText(f"Сохранено: {filename}")
-                self.output_path_label.setStyleSheet("color: #3fb950;")
+                self.output_path_label.setStyleSheet("color: #3fb950; font-size: 12px;")
             except Exception as e:
                 self.output_path_label.setText(f"Ошибка сохранения: {e}")
-                self.output_path_label.setStyleSheet("color: #f85149;")
+                self.output_path_label.setStyleSheet("color: #f85149; font-size: 12px;")
         
         self.record_status.setText("Готово")
         self.record_status.setStyleSheet("color: #3fb950; font-weight: 600;")
@@ -1560,7 +2064,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("BrainBit Monitor")
-        self.setMinimumSize(1100, 850)
+        self.setMinimumSize(1000, 700)
         self.setup_ui()
     
     def setup_ui(self):
@@ -1590,7 +2094,10 @@ class MainWindow(QMainWindow):
         if self.video_tab.is_recording:
             self.video_tab.stop_recording()
         eye_tracker.stop()
-        brain_bit_controller.stop_all()
+        try:
+            brain_bit_controller.stop_all()
+        except:
+            pass
         event.accept()
 
 

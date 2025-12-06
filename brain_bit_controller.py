@@ -79,7 +79,8 @@ class BrainBitAdditional:
                              channels_number=4,
                              channel_for_analysis=0)
 
-        ads = ArtifactDetectSetting(hanning_win_spectrum=True, num_wins_for_quality_avg=125)
+        ads = ArtifactDetectSetting(hanning_win_spectrum=True, num_wins_for_quality_avg=125, total_pow_border=120_000_000,
+                                         spect_art_by_totalp=True)
 
         mss = MentalAndSpectralSetting()
         return EmotionalMath(mls, ads, mss)
@@ -119,6 +120,10 @@ class BrainBitController(QObject):
         self.worker = None
 
     def search_with_result(self, seconds: int, addresses: List[str]):
+        # Пересоздаём сканер если он был уничтожен
+        if self.__scanner is None:
+            self.__scanner = Scanner([SensorFamily.LEBrainBit])
+        
         def __device_scan():
             self.__scanner.start()
             QThread.sleep(seconds)
@@ -208,10 +213,10 @@ class BrainBitController(QObject):
     def start_resist(self, address: str):
         def on_resist_received(sensor, data):
             try:
-                resistValues = ResistValues(O1=ResistState.Normal if data.O1 < 2500000 else ResistState.Bad,
-                                            O2=ResistState.Normal if data.O2 < 2500000 else ResistState.Bad,
-                                            T3=ResistState.Normal if data.T3 < 2500000 else ResistState.Bad,
-                                            T4=ResistState.Normal if data.T4 < 2500000 else ResistState.Bad)
+                resistValues = ResistValues(O1=ResistState.Normal if data.O1 < 2000000 else ResistState.Bad,
+                                            O2=ResistState.Normal if data.O2 < 2000000 else ResistState.Bad,
+                                            T3=ResistState.Normal if data.T3 < 2000000 else ResistState.Bad,
+                                            T4=ResistState.Normal if data.T4 < 2000000 else ResistState.Bad)
                 self.resistValuesUpdated.emit(sensor.address, resistValues)
             except Exception as err:
                 print(err)
@@ -300,15 +305,23 @@ class BrainBitController(QObject):
         thread.start()
 
     def stop_all(self):
-        self.__scanner.stop()
-        self.__scanner.sensorsChanged = None
-        self.__scanner = None
+        if self.__scanner is not None:
+            try:
+                self.__scanner.stop()
+                self.__scanner.sensorsChanged = None
+            except:
+                pass
+            self.__scanner = None
 
-        for device in self.__connected_devices.values():
-            device.bb.disconnect()
-            device.bb.sensorStateChanged = None
-            device.bb.batteryChanged = None
-            device.bb = None
+        for device in list(self.__connected_devices.values()):
+            try:
+                if device.bb is not None:
+                    device.bb.disconnect()
+                    device.bb.sensorStateChanged = None
+                    device.bb.batteryChanged = None
+                    device.bb = None
+            except:
+                pass
         self.__connected_devices.clear()
         self.connected_devices.clear()
         self.__disconnected_devices.clear()

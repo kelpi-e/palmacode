@@ -7,9 +7,8 @@ from PyQt6.QtWidgets import QFrame, QVBoxLayout, QLabel
 class MetricCard(QFrame):
     """Красивая карточка для отображения метрики"""
     
-    # Размеры шрифтов
-    SIZE_LARGE = "large"    # Для мониторинга - крупные карточки
-    SIZE_SMALL = "small"    # Для проверки контакта - компактные карточки
+    SIZE_LARGE = "large"
+    SIZE_SMALL = "small"
     
     def __init__(self, title: str, initial_value: str = "—", color: str = "#58a6ff", size: str = "large"):
         super().__init__()
@@ -17,20 +16,20 @@ class MetricCard(QFrame):
         self.color = color
         self.size = size
         
-        # Определяем размеры в зависимости от типа
         if size == self.SIZE_SMALL:
-            self.value_font_size = 16
-            self.title_font_size = 11
-            self.setMinimumWidth(80)
-            self.setMaximumWidth(120)
+            self.value_font_size = 18
+            self.title_font_size = 10
+            self.setFixedWidth(100)
+            self.setFixedHeight(60)
         else:
-            self.value_font_size = 32
-            self.title_font_size = 12
-            self.setMinimumWidth(140)
+            self.value_font_size = 28
+            self.title_font_size = 11
+            self.setMinimumWidth(120)
+            self.setFixedHeight(80)
         
         layout = QVBoxLayout(self)
-        layout.setSpacing(4 if size == self.SIZE_SMALL else 8)
-        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(2)
+        layout.setContentsMargins(10, 6, 10, 6)
         
         self.title_label = QLabel(title)
         self.title_label.setStyleSheet(
