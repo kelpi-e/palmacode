@@ -1,12 +1,12 @@
 import sys
 import os
 import json
-import struct
-import wave
 import urllib.request
 import urllib.error
 from datetime import datetime
 from collections import deque
+import threading
+import websocket
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -14,14 +14,13 @@ from PyQt6.QtWidgets import (
     QLineEdit, QGroupBox, QFileDialog, QFrame, QSlider, QSplitter,
     QDialog, QScrollArea, QMessageBox, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal, QThread, QIODevice, QByteArray
+from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QBrush, QLinearGradient
-from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QAudioSource, QAudioFormat, QMediaDevices
+from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 
 import pyqtgraph as pg
-import numpy as np
 
 from brain_bit_controller import (
     brain_bit_controller, BrainBitInfo, ConnectionState, ResistValues,
@@ -30,216 +29,6 @@ from brain_bit_controller import (
 from styles import STYLESHEET
 from widgets import MetricCard, ResistCard
 from eye_tracker import eye_tracker, GazeData, CalibrationDialog
-
-
-class AudioBuffer(QIODevice):
-    """Буфер для захвата аудио данных"""
-    data_ready = pyqtSignal(bytes)
-    
-    def __init__(self):
-        super().__init__()
-        self.buffer = QByteArray()
-    
-    def readData(self, maxlen):
-        return bytes(maxlen)
-    
-    def writeData(self, data):
-        self.data_ready.emit(bytes(data))
-        return len(data)
-
-
-class AudioAnalyzer(QThread):
-    """Анализатор аудио в реальном времени"""
-    level_changed = pyqtSignal(float)  # Уровень громкости 0-100
-    spectrum_ready = pyqtSignal(list)   # Спектр частот
-    
-    def __init__(self):
-        super().__init__()
-        self.audio_source = None
-        self.audio_buffer = None
-        self.running = False
-        self.current_level = 0.0
-        self._samples = []
-    
-    def start_capture(self):
-        """Начать захват аудио с микрофона"""
-        try:
-            # Получаем устройство ввода по умолчанию
-            device = QMediaDevices.defaultAudioInput()
-            if device is None:
-                print("Микрофон не найден")
-                return False
-            
-            # Настройка формата аудио
-            fmt = QAudioFormat()
-            fmt.setSampleRate(16000)
-            fmt.setChannelCount(1)
-            fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
-            
-            self.audio_buffer = AudioBuffer()
-            self.audio_buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-            self.audio_buffer.data_ready.connect(self._process_audio)
-            
-            self.audio_source = QAudioSource(device, fmt)
-            self.audio_source.start(self.audio_buffer)
-            self.running = True
-            return True
-        except Exception as e:
-            print(f"Ошибка захвата аудио: {e}")
-            return False
-    
-    def stop_capture(self):
-        """Остановить захват"""
-        self.running = False
-        if self.audio_source:
-            self.audio_source.stop()
-            self.audio_source = None
-        if self.audio_buffer:
-            self.audio_buffer.close()
-            self.audio_buffer = None
-    
-    def _process_audio(self, data):
-        """Обработка аудио данных"""
-        if not self.running or len(data) < 2:
-            return
-        
-        try:
-            # Преобразуем байты в числа
-            samples = np.frombuffer(data, dtype=np.int16)
-            if len(samples) == 0:
-                return
-            
-            # Вычисляем RMS (среднеквадратичное значение)
-            rms = np.sqrt(np.mean(samples.astype(np.float64) ** 2))
-            
-            # Нормализуем к 0-100
-            level = min(100, (rms / 32768) * 200)
-            self.current_level = level
-            self.level_changed.emit(level)
-            
-            # Простой спектральный анализ
-            if len(samples) >= 512:
-                fft = np.abs(np.fft.fft(samples[:512]))
-                spectrum = fft[:8].tolist()  # Первые 8 бинов частот
-                self.spectrum_ready.emit(spectrum)
-        except Exception as e:
-            pass
-    
-    def get_level(self):
-        return self.current_level
-
-
-class AudioLevelWidget(QWidget):
-    """Виджет индикатора уровня громкости"""
-    def __init__(self):
-        super().__init__()
-        self.level = 0.0
-        self.peak_level = 0.0
-        self.setMinimumSize(20, 100)
-        self.setMaximumWidth(40)
-        
-    def set_level(self, level):
-        self.level = level
-        self.peak_level = max(self.peak_level * 0.95, level)
-        self.update()
-    
-    def reset(self):
-        self.level = 0.0
-        self.peak_level = 0.0
-        self.update()
-        
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        # Фон
-        painter.fillRect(self.rect(), QColor("#0d1117"))
-        
-        # Рамка
-        painter.setPen(QPen(QColor("#30363d"), 1))
-        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
-        
-        # Область индикатора
-        margin = 4
-        bar_rect = self.rect().adjusted(margin, margin, -margin, -margin)
-        
-        if bar_rect.height() <= 0:
-            return
-        
-        # Градиент для уровня
-        gradient = QLinearGradient(0, bar_rect.bottom(), 0, bar_rect.top())
-        gradient.setColorAt(0.0, QColor("#3fb950"))  # Зелёный внизу
-        gradient.setColorAt(0.6, QColor("#d29922"))  # Жёлтый
-        gradient.setColorAt(0.85, QColor("#f85149"))  # Красный вверху
-        
-        # Текущий уровень
-        level_height = int(bar_rect.height() * (self.level / 100))
-        level_rect = bar_rect.adjusted(0, bar_rect.height() - level_height, 0, 0)
-        
-        painter.setBrush(QBrush(gradient))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRect(level_rect)
-        
-        # Пиковый уровень (линия)
-        if self.peak_level > 1:
-            peak_y = bar_rect.bottom() - int(bar_rect.height() * (self.peak_level / 100))
-            painter.setPen(QPen(QColor("#ffffff"), 2))
-            painter.drawLine(bar_rect.left(), peak_y, bar_rect.right(), peak_y)
-        
-        # Деления
-        painter.setPen(QPen(QColor("#30363d"), 1))
-        for i in range(1, 4):
-            y = bar_rect.top() + bar_rect.height() * i // 4
-            painter.drawLine(bar_rect.left(), y, bar_rect.left() + 3, y)
-            painter.drawLine(bar_rect.right() - 3, y, bar_rect.right(), y)
-
-
-class AudioSpectrumWidget(QWidget):
-    """Виджет спектра аудио"""
-    def __init__(self):
-        super().__init__()
-        self.spectrum = [0] * 8
-        self.setMinimumHeight(60)
-        self.setMaximumHeight(80)
-        
-    def set_spectrum(self, spectrum):
-        if len(spectrum) >= 8:
-            # Нормализуем
-            max_val = max(spectrum) if max(spectrum) > 0 else 1
-            self.spectrum = [min(1.0, s / max_val) for s in spectrum[:8]]
-            self.update()
-    
-    def reset(self):
-        self.spectrum = [0] * 8
-        self.update()
-        
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        # Фон
-        painter.fillRect(self.rect(), QColor("#0d1117"))
-        
-        margin = 4
-        area = self.rect().adjusted(margin, margin, -margin, -margin)
-        
-        bar_width = area.width() // 8 - 2
-        
-        colors = ["#3fb950", "#3fb950", "#58a6ff", "#58a6ff", 
-                  "#d29922", "#d29922", "#f85149", "#f85149"]
-        
-        for i, val in enumerate(self.spectrum):
-            x = area.left() + i * (bar_width + 2)
-            h = int(area.height() * val)
-            y = area.bottom() - h
-            
-            painter.setBrush(QBrush(QColor(colors[i])))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawRect(x, y, bar_width, h)
-
-
-# Глобальный анализатор аудио
-audio_analyzer = AudioAnalyzer()
 
 # API конфигурация
 API_BASE_URL = "http://10.128.7.198:8000"
@@ -1586,7 +1375,6 @@ class ResultsTab(QWidget):
         self.times = []
         self.attention = []
         self.relaxation = []
-        self.audio_level = []
         self.alpha = []
         self.beta = []
         self.theta = []
@@ -1723,14 +1511,13 @@ class ResultsTab(QWidget):
         
         self.cur_attention = MetricCard("Внимание", "--", "#58a6ff")
         self.cur_relaxation = MetricCard("Расслаб.", "--", "#a371f7")
-        self.cur_audio = MetricCard("Аудио", "--", "#d29922")
         self.cur_alpha = MetricCard("Альфа", "--", "#3fb950")
         self.cur_beta = MetricCard("Бета", "--", "#f0883e")
         self.cur_theta = MetricCard("Тета", "--", "#d29922")
         self.cur_gaze_x = MetricCard("Взгляд X", "--", "#8b949e")
         self.cur_gaze_y = MetricCard("Взгляд Y", "--", "#8b949e")
         
-        for card in [self.cur_attention, self.cur_relaxation, self.cur_audio, self.cur_alpha, self.cur_beta, self.cur_theta, self.cur_gaze_x, self.cur_gaze_y]:
+        for card in [self.cur_attention, self.cur_relaxation, self.cur_alpha, self.cur_beta, self.cur_theta, self.cur_gaze_x, self.cur_gaze_y]:
             cards_layout.addWidget(card)
         cards_layout.addStretch()
         scroll_layout.addWidget(cards_widget)
@@ -1763,20 +1550,6 @@ class ResultsTab(QWidget):
         self.spectral_plot.addItem(self.spectral_vline)
         spectral_layout.addWidget(self.spectral_plot)
         scroll_layout.addWidget(spectral_group)
-        
-        # Audio graph
-        audio_group = QGroupBox("Уровень аудио")
-        audio_group.setFixedHeight(120)
-        audio_layout = QVBoxLayout(audio_group)
-        audio_layout.setContentsMargins(8, 20, 8, 8)
-        self.audio_plot = pg.PlotWidget()
-        self.audio_plot.setBackground('#161b22')
-        self.audio_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.audio_plot.setYRange(0, 100)
-        self.audio_vline = pg.InfiniteLine(angle=90, pen=pg.mkPen('#f85149', width=2))
-        self.audio_plot.addItem(self.audio_vline)
-        audio_layout.addWidget(self.audio_plot)
-        scroll_layout.addWidget(audio_group)
         
         # Gaze graph
         gaze_group = QGroupBox("Позиция взгляда")
@@ -1939,10 +1712,8 @@ class ResultsTab(QWidget):
             
             attention_val = record.get('attention', 0)
             relaxation_val = record.get('relaxation', 0)
-            audio_val = record.get('audio_level', 0)
             self.cur_attention.set_value(f"{attention_val:.0f}%" if attention_val else "--")
             self.cur_relaxation.set_value(f"{relaxation_val:.0f}%" if relaxation_val else "--")
-            self.cur_audio.set_value(f"{audio_val:.0f}%" if audio_val else "--")
             self.cur_alpha.set_value(f"{record.get('alpha', 0)}%")
             self.cur_beta.set_value(f"{record.get('beta', 0)}%")
             self.cur_theta.set_value(f"{record.get('theta', 0)}%")
@@ -1960,7 +1731,6 @@ class ResultsTab(QWidget):
             
             self.mental_vline.setPos(elapsed)
             self.spectral_vline.setPos(elapsed)
-            self.audio_vline.setPos(elapsed)
             self.gaze_vline.setPos(elapsed)
     
     def update_graphs(self):
@@ -1970,7 +1740,6 @@ class ResultsTab(QWidget):
         self.times = []
         self.attention = []
         self.relaxation = []
-        self.audio_level = []
         self.alpha = []
         self.beta = []
         self.theta = []
@@ -1982,7 +1751,6 @@ class ResultsTab(QWidget):
                 self.times.append(float(row.get('elapsed_sec', 0)))
                 self.attention.append(float(row.get('attention', 0)))
                 self.relaxation.append(float(row.get('relaxation', 0)))
-                self.audio_level.append(float(row.get('audio_level', 0)))
                 self.alpha.append(float(row.get('alpha', 0)))
                 self.beta.append(float(row.get('beta', 0)))
                 self.theta.append(float(row.get('theta', 0)))
@@ -2005,11 +1773,6 @@ class ResultsTab(QWidget):
             self.spectral_plot.plot(self.times, self.alpha, pen=pg.mkPen('#3fb950', width=2))
             self.spectral_plot.plot(self.times, self.beta, pen=pg.mkPen('#f0883e', width=2))
             self.spectral_plot.plot(self.times, self.theta, pen=pg.mkPen('#d29922', width=2))
-        
-        self.audio_plot.clear()
-        self.audio_plot.addItem(self.audio_vline)
-        if self.times:
-            self.audio_plot.plot(self.times, self.audio_level, pen=pg.mkPen('#d29922', width=2), name='Аудио')
         
         self.gaze_plot.clear()
         self.gaze_plot.addItem(self.gaze_vline)
@@ -2211,7 +1974,7 @@ class ConnectionTab(QWidget):
             self.search_btn.setText("Искать снова")
             self.search_btn.setEnabled(True)
             try:
-                brain_bit_controller.foundedDevices.disconnect(on_founded)
+            brain_bit_controller.foundedDevices.disconnect(on_founded)
             except:
                 pass
         
@@ -2556,7 +2319,6 @@ class VideoRecordingTab(QWidget):
         self.record_count_value = 0
         self.current_brain_data = {}
         self.current_gaze_data = None
-        self.current_audio_level = 0.0
         self.video_loaded = False
         self.video_file_path = None
         self.camera_active = False
@@ -2570,12 +2332,13 @@ class VideoRecordingTab(QWidget):
         self.alpha_data = deque([0] * self.data_points, maxlen=self.data_points)
         self.beta_data = deque([0] * self.data_points, maxlen=self.data_points)
         self.theta_data = deque([0] * self.data_points, maxlen=self.data_points)
-        self.audio_data = deque([0] * self.data_points, maxlen=self.data_points)
         self.gaze_x_data = deque([0] * self.data_points, maxlen=self.data_points)
         self.gaze_y_data = deque([0] * self.data_points, maxlen=self.data_points)
         
         self.setup_ui()
         self.connect_signals()
+        # Initialize graphs with empty data
+        QTimer.singleShot(100, self.update_plots)
     
     def setup_ui(self):
         main_layout = QVBoxLayout(self)
@@ -2813,40 +2576,12 @@ class VideoRecordingTab(QWidget):
         self.rec_relaxation = MetricCard("Расслаб.", "—", "#a371f7", size="small")
         self.rec_gaze_x = MetricCard("Взгляд X", "—", "#8b949e", size="small")
         self.rec_gaze_y = MetricCard("Взгляд Y", "—", "#8b949e", size="small")
-        self.rec_audio = MetricCard("Аудио", "—", "#d29922", size="small")
         values_layout.addWidget(self.rec_attention)
         values_layout.addWidget(self.rec_relaxation)
         values_layout.addWidget(self.rec_gaze_x)
         values_layout.addWidget(self.rec_gaze_y)
-        values_layout.addWidget(self.rec_audio)
         values_layout.addStretch()
         record_layout.addWidget(values_widget)
-        
-        # Audio section
-        audio_widget = QWidget()
-        audio_widget.setFixedHeight(80)
-        audio_layout = QHBoxLayout(audio_widget)
-        audio_layout.setContentsMargins(0, 0, 0, 0)
-        audio_layout.setSpacing(8)
-        
-        audio_label = QLabel("Микрофон:")
-        audio_label.setStyleSheet("color: #8b949e; font-size: 11px;")
-        audio_label.setFixedWidth(65)
-        audio_layout.addWidget(audio_label)
-        
-        self.audio_level = AudioLevelWidget()
-        self.audio_level.setFixedWidth(30)
-        audio_layout.addWidget(self.audio_level)
-        
-        self.audio_spectrum = AudioSpectrumWidget()
-        audio_layout.addWidget(self.audio_spectrum, stretch=1)
-        
-        self.audio_status_label = QLabel("Выкл")
-        self.audio_status_label.setStyleSheet("color: #8b949e; font-size: 11px;")
-        self.audio_status_label.setFixedWidth(40)
-        audio_layout.addWidget(self.audio_status_label)
-        
-        record_layout.addWidget(audio_widget)
         
         layout.addWidget(record_group)
         
@@ -2881,19 +2616,6 @@ class VideoRecordingTab(QWidget):
         self.theta_curve = self.spectral_plot.plot(pen=pg.mkPen('#d29922', width=2))
         spectral_layout.addWidget(self.spectral_plot)
         layout.addWidget(spectral_group)
-        
-        # Audio graph
-        audio_graph_group = QGroupBox("Уровень аудио")
-        audio_graph_group.setMinimumHeight(120)
-        audio_graph_layout = QVBoxLayout(audio_graph_group)
-        audio_graph_layout.setContentsMargins(8, 24, 8, 8)
-        self.audio_plot = pg.PlotWidget()
-        self.audio_plot.setBackground('#161b22')
-        self.audio_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.audio_plot.setYRange(0, 100)
-        self.audio_curve = self.audio_plot.plot(pen=pg.mkPen('#d29922', width=2))
-        audio_graph_layout.addWidget(self.audio_plot)
-        layout.addWidget(audio_graph_group)
         
         # Gaze graph
         gaze_graph_group = QGroupBox("Позиция взгляда")
@@ -2946,21 +2668,6 @@ class VideoRecordingTab(QWidget):
         eye_tracker.tracking_started.connect(self.on_tracking_started)
         eye_tracker.tracking_stopped.connect(self.on_tracking_stopped)
         eye_tracker.error_occurred.connect(self.on_tracking_error)
-        
-        # Audio signals
-        audio_analyzer.level_changed.connect(self._on_audio_level)
-        audio_analyzer.spectrum_ready.connect(self._on_audio_spectrum)
-    
-    def _on_audio_level(self, level):
-        """Обновление уровня громкости"""
-        self.audio_level.set_level(level)
-        if level > 0:
-            self.rec_audio.set_value(f"{int(level)}%")
-        self.current_audio_level = level
-    
-    def _on_audio_spectrum(self, spectrum):
-        """Обновление спектра"""
-        self.audio_spectrum.set_spectrum(spectrum)
     
     def select_video(self):
         filename, _ = QFileDialog.getOpenFileName(self, "Выбрать видео", "", "Видео (*.mp4 *.avi *.mkv *.mov)")
@@ -3114,8 +2821,21 @@ class VideoRecordingTab(QWidget):
             if self.is_recording:
                 self.rec_gaze_x.set_value(f"{gaze.screen_x:.2f}")
                 self.rec_gaze_y.set_value(f"{gaze.screen_y:.2f}")
+                self.gaze_x_data.append(gaze.screen_x if gaze.screen_x else 0)
+                self.gaze_y_data.append(gaze.screen_y if gaze.screen_y else 0)
         except Exception:
             pass
+    
+    def update_plots(self):
+        """Обновить графики в реальном времени"""
+        x = list(range(self.data_points))
+        self.attention_curve.setData(x, list(self.attention_data))
+        self.relaxation_curve.setData(x, list(self.relaxation_data))
+        self.alpha_curve.setData(x, list(self.alpha_data))
+        self.beta_curve.setData(x, list(self.beta_data))
+        self.theta_curve.setData(x, list(self.theta_data))
+        self.gaze_x_curve.setData(x, list(self.gaze_x_data))
+        self.gaze_y_curve.setData(x, list(self.gaze_y_data))
     
     def _check_ready(self):
         self.start_record_btn.setEnabled(True)
@@ -3161,6 +2881,8 @@ class VideoRecordingTab(QWidget):
                 if address == addr and self.is_recording:
                     self.current_brain_data['attention'] = data.attention
                     self.current_brain_data['relaxation'] = data.relaxation
+                    self.attention_data.append(data.attention)
+                    self.relaxation_data.append(data.relaxation)
                     self.rec_attention.set_value(f"{data.attention:.0f}%")
                     self.rec_relaxation.set_value(f"{data.relaxation:.0f}%")
             
@@ -3169,6 +2891,9 @@ class VideoRecordingTab(QWidget):
                     self.current_brain_data['alpha'] = data.alpha
                     self.current_brain_data['beta'] = data.beta
                     self.current_brain_data['theta'] = data.theta
+                    self.alpha_data.append(data.alpha)
+                    self.beta_data.append(data.beta)
+                    self.theta_data.append(data.theta)
             
             def on_artifact(address, is_art):
                 if address == addr and self.is_recording:
@@ -3186,15 +2911,8 @@ class VideoRecordingTab(QWidget):
             brain_bit_controller.isArtefacted.connect(on_artifact)
             brain_bit_controller.start_calculations(addr)
         
-        # Запуск захвата аудио
-        if audio_analyzer.start_capture():
-            self.audio_status_label.setText("ВКЛ")
-            self.audio_status_label.setStyleSheet("color: #3fb950; font-size: 11px;")
-        else:
-            self.audio_status_label.setText("Нет")
-            self.audio_status_label.setStyleSheet("color: #f85149; font-size: 11px;")
-        
         self.record_timer.start(100)
+        self.update_timer.start(100)  # Update graphs every 100ms
         self.record_status.setText("ЗАПИСЬ")
         self.record_status.setStyleSheet("color: #f85149; font-weight: 600;")
         self.start_record_btn.setEnabled(False)
@@ -3214,7 +2932,6 @@ class VideoRecordingTab(QWidget):
             'video_ms': video_pos,
             'attention': self.current_brain_data.get('attention', 0),
             'relaxation': self.current_brain_data.get('relaxation', 0),
-            'audio_level': round(self.current_audio_level, 1),
             'alpha': self.current_brain_data.get('alpha', 0),
             'beta': self.current_brain_data.get('beta', 0),
             'theta': self.current_brain_data.get('theta', 0),
@@ -3233,14 +2950,26 @@ class VideoRecordingTab(QWidget):
     def stop_recording(self):
         self.is_recording = False
         self.record_timer.stop()
+        self.update_timer.stop()
         
-        # Остановка захвата аудио
-        audio_analyzer.stop_capture()
-        self.audio_status_label.setText("Выкл")
-        self.audio_status_label.setStyleSheet("color: #8b949e; font-size: 11px;")
-        self.audio_level.reset()
-        self.audio_spectrum.reset()
-        self.rec_audio.set_value("—")
+        # Clear graph data
+        self.attention_data.clear()
+        self.relaxation_data.clear()
+        self.alpha_data.clear()
+        self.beta_data.clear()
+        self.theta_data.clear()
+        self.gaze_x_data.clear()
+        self.gaze_y_data.clear()
+        # Fill with zeros
+        for _ in range(self.data_points):
+            self.attention_data.append(0)
+            self.relaxation_data.append(0)
+            self.alpha_data.append(0)
+            self.beta_data.append(0)
+            self.theta_data.append(0)
+            self.gaze_x_data.append(0)
+            self.gaze_y_data.append(0)
+        self.update_plots()  # Clear graphs
         
         self.electrode_warning.setVisible(False)
         
@@ -3646,7 +3375,7 @@ class MainWindow(QMainWindow):
             self.video_tab.stop_recording()
         eye_tracker.stop()
         try:
-            brain_bit_controller.stop_all()
+        brain_bit_controller.stop_all()
         except:
             pass
         event.accept()
