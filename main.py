@@ -6,7 +6,10 @@ import urllib.error
 from datetime import datetime
 from collections import deque
 import threading
-import websocket
+try:
+    import websocket
+except ImportError:
+    websocket = None
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -1974,7 +1977,7 @@ class ConnectionTab(QWidget):
             self.search_btn.setText("Искать снова")
             self.search_btn.setEnabled(True)
             try:
-            brain_bit_controller.foundedDevices.disconnect(on_founded)
+                brain_bit_controller.foundedDevices.disconnect(on_founded)
             except:
                 pass
         
@@ -2932,6 +2935,7 @@ class VideoRecordingTab(QWidget):
             'video_ms': video_pos,
             'attention': self.current_brain_data.get('attention', 0),
             'relaxation': self.current_brain_data.get('relaxation', 0),
+            'audio_level': 0.0,
             'alpha': self.current_brain_data.get('alpha', 0),
             'beta': self.current_brain_data.get('beta', 0),
             'theta': self.current_brain_data.get('theta', 0),
@@ -3017,10 +3021,45 @@ class VideoRecordingTab(QWidget):
                 self.output_path_label.setText(f"Ошибка сохранения: {e}")
                 self.output_path_label.setStyleSheet("color: #f85149; font-size: 12px;")
         
+        # Отправка данных по WebSocket
+        if self.record_data:
+            self._send_data_via_websocket(self.record_data)
+        
         self.record_status.setText("Готово")
         self.record_status.setStyleSheet("color: #3fb950; font-weight: 600;")
         self.start_record_btn.setEnabled(True)
         self.stop_record_btn.setEnabled(False)
+    
+    def _send_data_via_websocket(self, data):
+        """Отправка данных по WebSocket в отдельном потоке"""
+        if websocket is None:
+            print("Библиотека websocket-client не установлена. Установите: pip install websocket-client")
+            return
+        
+        def send_in_thread():
+            try:
+                ws_url = "ws://10.128.7.6:8099/influxdbpoints/ws/login/12345"
+                ws = websocket.create_connection(ws_url)
+                
+                # Отправляем данные как JSON массив
+                json_data = json.dumps(data, ensure_ascii=False)
+                ws.send(json_data)
+                
+                # Получаем ответ (опционально)
+                try:
+                    response = ws.recv()
+                    print(f"WebSocket ответ: {response}")
+                except:
+                    pass
+                
+                ws.close()
+                print("Данные успешно отправлены по WebSocket")
+            except Exception as e:
+                print(f"Ошибка отправки данных по WebSocket: {e}")
+        
+        # Запускаем отправку в отдельном потоке
+        thread = threading.Thread(target=send_in_thread, daemon=True)
+        thread.start()
 
 
 class VideoLibraryTab(QWidget):
@@ -3375,7 +3414,7 @@ class MainWindow(QMainWindow):
             self.video_tab.stop_recording()
         eye_tracker.stop()
         try:
-        brain_bit_controller.stop_all()
+            brain_bit_controller.stop_all()
         except:
             pass
         event.accept()

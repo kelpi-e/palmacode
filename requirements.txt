@@ -5,3 +5,4 @@ PyQt6-WebEngine
 pyqtgraph
 numpy
 opencv-python
+websocket-client
