@@ -1,6 +1,10 @@
 import sys
 import os
 import json
+import struct
+import wave
+import urllib.request
+import urllib.error
 from datetime import datetime
 from collections import deque
 
@@ -10,12 +14,14 @@ from PyQt6.QtWidgets import (
     QLineEdit, QGroupBox, QFileDialog, QFrame, QSlider, QSplitter,
     QDialog, QScrollArea, QMessageBox, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal, QThread
-from PyQt6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QBrush
-from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal, QThread, QIODevice, QByteArray
+from PyQt6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QBrush, QLinearGradient
+from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QAudioSource, QAudioFormat, QMediaDevices
+
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 
 import pyqtgraph as pg
+import numpy as np
 
 from brain_bit_controller import (
     brain_bit_controller, BrainBitInfo, ConnectionState, ResistValues,
@@ -24,6 +30,763 @@ from brain_bit_controller import (
 from styles import STYLESHEET
 from widgets import MetricCard, ResistCard
 from eye_tracker import eye_tracker, GazeData, CalibrationDialog
+
+
+class AudioBuffer(QIODevice):
+    """Буфер для захвата аудио данных"""
+    data_ready = pyqtSignal(bytes)
+    
+    def __init__(self):
+        super().__init__()
+        self.buffer = QByteArray()
+    
+    def readData(self, maxlen):
+        return bytes(maxlen)
+    
+    def writeData(self, data):
+        self.data_ready.emit(bytes(data))
+        return len(data)
+
+
+class AudioAnalyzer(QThread):
+    """Анализатор аудио в реальном времени"""
+    level_changed = pyqtSignal(float)  # Уровень громкости 0-100
+    spectrum_ready = pyqtSignal(list)   # Спектр частот
+    
+    def __init__(self):
+        super().__init__()
+        self.audio_source = None
+        self.audio_buffer = None
+        self.running = False
+        self.current_level = 0.0
+        self._samples = []
+    
+    def start_capture(self):
+        """Начать захват аудио с микрофона"""
+        try:
+            # Получаем устройство ввода по умолчанию
+            device = QMediaDevices.defaultAudioInput()
+            if device is None:
+                print("Микрофон не найден")
+                return False
+            
+            # Настройка формата аудио
+            fmt = QAudioFormat()
+            fmt.setSampleRate(16000)
+            fmt.setChannelCount(1)
+            fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+            
+            self.audio_buffer = AudioBuffer()
+            self.audio_buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+            self.audio_buffer.data_ready.connect(self._process_audio)
+            
+            self.audio_source = QAudioSource(device, fmt)
+            self.audio_source.start(self.audio_buffer)
+            self.running = True
+            return True
+        except Exception as e:
+            print(f"Ошибка захвата аудио: {e}")
+            return False
+    
+    def stop_capture(self):
+        """Остановить захват"""
+        self.running = False
+        if self.audio_source:
+            self.audio_source.stop()
+            self.audio_source = None
+        if self.audio_buffer:
+            self.audio_buffer.close()
+            self.audio_buffer = None
+    
+    def _process_audio(self, data):
+        """Обработка аудио данных"""
+        if not self.running or len(data) < 2:
+            return
+        
+        try:
+            # Преобразуем байты в числа
+            samples = np.frombuffer(data, dtype=np.int16)
+            if len(samples) == 0:
+                return
+            
+            # Вычисляем RMS (среднеквадратичное значение)
+            rms = np.sqrt(np.mean(samples.astype(np.float64) ** 2))
+            
+            # Нормализуем к 0-100
+            level = min(100, (rms / 32768) * 200)
+            self.current_level = level
+            self.level_changed.emit(level)
+            
+            # Простой спектральный анализ
+            if len(samples) >= 512:
+                fft = np.abs(np.fft.fft(samples[:512]))
+                spectrum = fft[:8].tolist()  # Первые 8 бинов частот
+                self.spectrum_ready.emit(spectrum)
+        except Exception as e:
+            pass
+    
+    def get_level(self):
+        return self.current_level
+
+
+class AudioLevelWidget(QWidget):
+    """Виджет индикатора уровня громкости"""
+    def __init__(self):
+        super().__init__()
+        self.level = 0.0
+        self.peak_level = 0.0
+        self.setMinimumSize(20, 100)
+        self.setMaximumWidth(40)
+        
+    def set_level(self, level):
+        self.level = level
+        self.peak_level = max(self.peak_level * 0.95, level)
+        self.update()
+    
+    def reset(self):
+        self.level = 0.0
+        self.peak_level = 0.0
+        self.update()
+        
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Фон
+        painter.fillRect(self.rect(), QColor("#0d1117"))
+        
+        # Рамка
+        painter.setPen(QPen(QColor("#30363d"), 1))
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+        
+        # Область индикатора
+        margin = 4
+        bar_rect = self.rect().adjusted(margin, margin, -margin, -margin)
+        
+        if bar_rect.height() <= 0:
+            return
+        
+        # Градиент для уровня
+        gradient = QLinearGradient(0, bar_rect.bottom(), 0, bar_rect.top())
+        gradient.setColorAt(0.0, QColor("#3fb950"))  # Зелёный внизу
+        gradient.setColorAt(0.6, QColor("#d29922"))  # Жёлтый
+        gradient.setColorAt(0.85, QColor("#f85149"))  # Красный вверху
+        
+        # Текущий уровень
+        level_height = int(bar_rect.height() * (self.level / 100))
+        level_rect = bar_rect.adjusted(0, bar_rect.height() - level_height, 0, 0)
+        
+        painter.setBrush(QBrush(gradient))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRect(level_rect)
+        
+        # Пиковый уровень (линия)
+        if self.peak_level > 1:
+            peak_y = bar_rect.bottom() - int(bar_rect.height() * (self.peak_level / 100))
+            painter.setPen(QPen(QColor("#ffffff"), 2))
+            painter.drawLine(bar_rect.left(), peak_y, bar_rect.right(), peak_y)
+        
+        # Деления
+        painter.setPen(QPen(QColor("#30363d"), 1))
+        for i in range(1, 4):
+            y = bar_rect.top() + bar_rect.height() * i // 4
+            painter.drawLine(bar_rect.left(), y, bar_rect.left() + 3, y)
+            painter.drawLine(bar_rect.right() - 3, y, bar_rect.right(), y)
+
+
+class AudioSpectrumWidget(QWidget):
+    """Виджет спектра аудио"""
+    def __init__(self):
+        super().__init__()
+        self.spectrum = [0] * 8
+        self.setMinimumHeight(60)
+        self.setMaximumHeight(80)
+        
+    def set_spectrum(self, spectrum):
+        if len(spectrum) >= 8:
+            # Нормализуем
+            max_val = max(spectrum) if max(spectrum) > 0 else 1
+            self.spectrum = [min(1.0, s / max_val) for s in spectrum[:8]]
+            self.update()
+    
+    def reset(self):
+        self.spectrum = [0] * 8
+        self.update()
+        
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Фон
+        painter.fillRect(self.rect(), QColor("#0d1117"))
+        
+        margin = 4
+        area = self.rect().adjusted(margin, margin, -margin, -margin)
+        
+        bar_width = area.width() // 8 - 2
+        
+        colors = ["#3fb950", "#3fb950", "#58a6ff", "#58a6ff", 
+                  "#d29922", "#d29922", "#f85149", "#f85149"]
+        
+        for i, val in enumerate(self.spectrum):
+            x = area.left() + i * (bar_width + 2)
+            h = int(area.height() * val)
+            y = area.bottom() - h
+            
+            painter.setBrush(QBrush(QColor(colors[i])))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRect(x, y, bar_width, h)
+
+
+# Глобальный анализатор аудио
+audio_analyzer = AudioAnalyzer()
+
+# API конфигурация
+API_BASE_URL = "http://10.128.7.198:8000"
+
+
+class AuthManager:
+    """Менеджер аутентификации"""
+    def __init__(self):
+        self.access_token = None
+        self.user_email = None
+        self.user_role = None
+    
+    def is_authenticated(self):
+        return self.access_token is not None
+    
+    def set_token(self, token, email=None, role=None):
+        self.access_token = token
+        self.user_email = email
+        self.user_role = role
+    
+    def clear(self):
+        self.access_token = None
+        self.user_email = None
+        self.user_role = None
+    
+    def get_headers(self):
+        if self.access_token:
+            return {"Authorization": f"Bearer {self.access_token}"}
+        return {}
+
+
+# Глобальный менеджер авторизации
+auth_manager = AuthManager()
+
+
+class AuthTab(QWidget):
+    """Вкладка авторизации и регистрации"""
+    auth_changed = pyqtSignal(bool)  # Сигнал об изменении статуса авторизации
+    
+    def __init__(self):
+        super().__init__()
+        self.setup_ui()
+    
+    def setup_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content)
+        layout.setSpacing(20)
+        layout.setContentsMargins(40, 40, 40, 40)
+        
+        # Заголовок
+        header = QLabel("Авторизация")
+        header.setStyleSheet("font-size: 28px; font-weight: 700; color: #ffffff;")
+        header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(header)
+        
+        # Статус авторизации
+        self.status_frame = QFrame()
+        self.status_frame.setStyleSheet("""
+            QFrame {
+                background-color: #161b22;
+                border: 1px solid #30363d;
+                border-radius: 12px;
+                padding: 20px;
+            }
+        """)
+        status_layout = QVBoxLayout(self.status_frame)
+        status_layout.setSpacing(12)
+        
+        self.status_label = QLabel("Вы не авторизованы")
+        self.status_label.setStyleSheet("font-size: 16px; color: #8b949e;")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        status_layout.addWidget(self.status_label)
+        
+        self.user_info_label = QLabel("")
+        self.user_info_label.setStyleSheet("font-size: 14px; color: #58a6ff;")
+        self.user_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.user_info_label.setVisible(False)
+        status_layout.addWidget(self.user_info_label)
+        
+        self.logout_btn = QPushButton("Выйти")
+        self.logout_btn.setFixedWidth(150)
+        self.logout_btn.setVisible(False)
+        self.logout_btn.clicked.connect(self.logout)
+        logout_container = QWidget()
+        logout_layout = QHBoxLayout(logout_container)
+        logout_layout.setContentsMargins(0, 0, 0, 0)
+        logout_layout.addStretch()
+        logout_layout.addWidget(self.logout_btn)
+        logout_layout.addStretch()
+        status_layout.addWidget(logout_container)
+        
+        layout.addWidget(self.status_frame)
+        
+        # Контейнер для форм
+        forms_container = QWidget()
+        forms_layout = QHBoxLayout(forms_container)
+        forms_layout.setSpacing(30)
+        forms_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # === Форма входа ===
+        login_group = QGroupBox("Вход")
+        login_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 18px;
+                font-weight: 600;
+                color: #58a6ff;
+                border: 1px solid #30363d;
+                border-radius: 12px;
+                margin-top: 16px;
+                padding-top: 16px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 20px;
+                padding: 0 10px;
+            }
+        """)
+        login_layout = QVBoxLayout(login_group)
+        login_layout.setSpacing(16)
+        login_layout.setContentsMargins(24, 32, 24, 24)
+        
+        # Email для входа
+        login_email_label = QLabel("Email")
+        login_email_label.setStyleSheet("color: #e6edf3; font-size: 14px;")
+        login_layout.addWidget(login_email_label)
+        
+        self.login_email = QLineEdit()
+        self.login_email.setPlaceholderText("user@example.com")
+        self.login_email.setFixedHeight(40)
+        self.login_email.setStyleSheet("""
+            QLineEdit {
+                background-color: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                padding: 8px 12px;
+                color: #e6edf3;
+                font-size: 14px;
+            }
+            QLineEdit:focus {
+                border-color: #58a6ff;
+            }
+        """)
+        login_layout.addWidget(self.login_email)
+        
+        # Пароль для входа
+        login_pass_label = QLabel("Пароль")
+        login_pass_label.setStyleSheet("color: #e6edf3; font-size: 14px;")
+        login_layout.addWidget(login_pass_label)
+        
+        self.login_password = QLineEdit()
+        self.login_password.setPlaceholderText("Введите пароль")
+        self.login_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.login_password.setFixedHeight(40)
+        self.login_password.setStyleSheet("""
+            QLineEdit {
+                background-color: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                padding: 8px 12px;
+                color: #e6edf3;
+                font-size: 14px;
+            }
+            QLineEdit:focus {
+                border-color: #58a6ff;
+            }
+        """)
+        login_layout.addWidget(self.login_password)
+        
+        # Кнопка входа
+        self.login_btn = QPushButton("Войти")
+        self.login_btn.setFixedHeight(44)
+        self.login_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #238636;
+                color: white;
+                font-size: 16px;
+                font-weight: 600;
+                border: none;
+                border-radius: 8px;
+            }
+            QPushButton:hover {
+                background-color: #2ea043;
+            }
+            QPushButton:pressed {
+                background-color: #238636;
+            }
+            QPushButton:disabled {
+                background-color: #21262d;
+                color: #8b949e;
+            }
+        """)
+        self.login_btn.clicked.connect(self.login)
+        login_layout.addWidget(self.login_btn)
+        
+        # Сообщение об ошибке входа
+        self.login_error = QLabel("")
+        self.login_error.setStyleSheet("color: #f85149; font-size: 12px;")
+        self.login_error.setWordWrap(True)
+        self.login_error.setVisible(False)
+        login_layout.addWidget(self.login_error)
+        
+        login_layout.addStretch()
+        forms_layout.addWidget(login_group)
+        
+        # === Форма регистрации ===
+        register_group = QGroupBox("Регистрация")
+        register_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 18px;
+                font-weight: 600;
+                color: #a371f7;
+                border: 1px solid #30363d;
+                border-radius: 12px;
+                margin-top: 16px;
+                padding-top: 16px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 20px;
+                padding: 0 10px;
+            }
+        """)
+        register_layout = QVBoxLayout(register_group)
+        register_layout.setSpacing(16)
+        register_layout.setContentsMargins(24, 32, 24, 24)
+        
+        # Email для регистрации
+        reg_email_label = QLabel("Email")
+        reg_email_label.setStyleSheet("color: #e6edf3; font-size: 14px;")
+        register_layout.addWidget(reg_email_label)
+        
+        self.reg_email = QLineEdit()
+        self.reg_email.setPlaceholderText("user@example.com")
+        self.reg_email.setFixedHeight(40)
+        self.reg_email.setStyleSheet("""
+            QLineEdit {
+                background-color: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                padding: 8px 12px;
+                color: #e6edf3;
+                font-size: 14px;
+            }
+            QLineEdit:focus {
+                border-color: #a371f7;
+            }
+        """)
+        register_layout.addWidget(self.reg_email)
+        
+        # Пароль для регистрации
+        reg_pass_label = QLabel("Пароль")
+        reg_pass_label.setStyleSheet("color: #e6edf3; font-size: 14px;")
+        register_layout.addWidget(reg_pass_label)
+        
+        self.reg_password = QLineEdit()
+        self.reg_password.setPlaceholderText("Минимум 6 символов")
+        self.reg_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.reg_password.setFixedHeight(40)
+        self.reg_password.setStyleSheet("""
+            QLineEdit {
+                background-color: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                padding: 8px 12px;
+                color: #e6edf3;
+                font-size: 14px;
+            }
+            QLineEdit:focus {
+                border-color: #a371f7;
+            }
+        """)
+        register_layout.addWidget(self.reg_password)
+        
+        # Подтверждение пароля
+        reg_pass2_label = QLabel("Подтвердите пароль")
+        reg_pass2_label.setStyleSheet("color: #e6edf3; font-size: 14px;")
+        register_layout.addWidget(reg_pass2_label)
+        
+        self.reg_password2 = QLineEdit()
+        self.reg_password2.setPlaceholderText("Повторите пароль")
+        self.reg_password2.setEchoMode(QLineEdit.EchoMode.Password)
+        self.reg_password2.setFixedHeight(40)
+        self.reg_password2.setStyleSheet("""
+            QLineEdit {
+                background-color: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                padding: 8px 12px;
+                color: #e6edf3;
+                font-size: 14px;
+            }
+            QLineEdit:focus {
+                border-color: #a371f7;
+            }
+        """)
+        register_layout.addWidget(self.reg_password2)
+        
+        # Кнопка регистрации
+        self.register_btn = QPushButton("Зарегистрироваться")
+        self.register_btn.setFixedHeight(44)
+        self.register_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #8957e5;
+                color: white;
+                font-size: 16px;
+                font-weight: 600;
+                border: none;
+                border-radius: 8px;
+            }
+            QPushButton:hover {
+                background-color: #a371f7;
+            }
+            QPushButton:pressed {
+                background-color: #8957e5;
+            }
+            QPushButton:disabled {
+                background-color: #21262d;
+                color: #8b949e;
+            }
+        """)
+        self.register_btn.clicked.connect(self.register)
+        register_layout.addWidget(self.register_btn)
+        
+        # Сообщение об ошибке регистрации
+        self.reg_error = QLabel("")
+        self.reg_error.setStyleSheet("color: #f85149; font-size: 12px;")
+        self.reg_error.setWordWrap(True)
+        self.reg_error.setVisible(False)
+        register_layout.addWidget(self.reg_error)
+        
+        # Сообщение об успехе
+        self.reg_success = QLabel("")
+        self.reg_success.setStyleSheet("color: #3fb950; font-size: 12px;")
+        self.reg_success.setWordWrap(True)
+        self.reg_success.setVisible(False)
+        register_layout.addWidget(self.reg_success)
+        
+        register_layout.addStretch()
+        forms_layout.addWidget(register_group)
+        
+        layout.addWidget(forms_container)
+        
+        # Настройки сервера
+        server_group = QGroupBox("Настройки сервера")
+        server_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 14px;
+                font-weight: 600;
+                color: #8b949e;
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                margin-top: 12px;
+                padding-top: 12px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 16px;
+                padding: 0 8px;
+            }
+        """)
+        server_layout = QHBoxLayout(server_group)
+        server_layout.setContentsMargins(16, 24, 16, 16)
+        
+        server_label = QLabel("URL сервера:")
+        server_label.setStyleSheet("color: #8b949e;")
+        server_layout.addWidget(server_label)
+        
+        self.server_url = QLineEdit(API_BASE_URL)
+        self.server_url.setFixedHeight(36)
+        self.server_url.setStyleSheet("""
+            QLineEdit {
+                background-color: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 6px 12px;
+                color: #e6edf3;
+                font-size: 13px;
+            }
+        """)
+        server_layout.addWidget(self.server_url, stretch=1)
+        
+        layout.addWidget(server_group)
+        
+        layout.addStretch()
+        scroll.setWidget(scroll_content)
+        main_layout.addWidget(scroll)
+    
+    def _make_request(self, endpoint, data):
+        """Отправить POST запрос к API"""
+        url = f"{self.server_url.text()}{endpoint}"
+        
+        try:
+            json_data = json.dumps(data).encode('utf-8')
+            req = urllib.request.Request(
+                url,
+                data=json_data,
+                headers={
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                },
+                method='POST'
+            )
+            
+            with urllib.request.urlopen(req, timeout=10) as response:
+                return json.loads(response.read().decode('utf-8')), None
+                
+        except urllib.error.HTTPError as e:
+            try:
+                error_body = json.loads(e.read().decode('utf-8'))
+                if 'detail' in error_body:
+                    if isinstance(error_body['detail'], list):
+                        msg = "; ".join([d.get('msg', str(d)) for d in error_body['detail']])
+                    else:
+                        msg = str(error_body['detail'])
+                    return None, msg
+            except:
+                pass
+            return None, f"Ошибка {e.code}: {e.reason}"
+        except urllib.error.URLError as e:
+            return None, f"Ошибка подключения: {e.reason}"
+        except Exception as e:
+            return None, f"Ошибка: {str(e)}"
+    
+    def login(self):
+        """Вход в систему"""
+        email = self.login_email.text().strip()
+        password = self.login_password.text()
+        
+        if not email or not password:
+            self.login_error.setText("Заполните все поля")
+            self.login_error.setVisible(True)
+            return
+        
+        self.login_btn.setEnabled(False)
+        self.login_btn.setText("Вход...")
+        self.login_error.setVisible(False)
+        
+        # Делаем запрос
+        data = {"email": email, "password": password}
+        result, error = self._make_request("/auth/login", data)
+        
+        self.login_btn.setEnabled(True)
+        self.login_btn.setText("Войти")
+        
+        if error:
+            self.login_error.setText(error)
+            self.login_error.setVisible(True)
+            return
+        
+        # Успешный вход
+        token = result.get('access_token')
+        auth_manager.set_token(token, email)
+        
+        self._update_auth_status()
+        self.auth_changed.emit(True)
+        
+        # Очищаем форму
+        self.login_password.clear()
+    
+    def register(self):
+        """Регистрация нового пользователя"""
+        email = self.reg_email.text().strip()
+        password = self.reg_password.text()
+        password2 = self.reg_password2.text()
+        
+        if not email or not password or not password2:
+            self.reg_error.setText("Заполните все поля")
+            self.reg_error.setVisible(True)
+            self.reg_success.setVisible(False)
+            return
+        
+        if password != password2:
+            self.reg_error.setText("Пароли не совпадают")
+            self.reg_error.setVisible(True)
+            self.reg_success.setVisible(False)
+            return
+        
+        if len(password) < 6:
+            self.reg_error.setText("Пароль должен быть минимум 6 символов")
+            self.reg_error.setVisible(True)
+            self.reg_success.setVisible(False)
+            return
+        
+        self.register_btn.setEnabled(False)
+        self.register_btn.setText("Регистрация...")
+        self.reg_error.setVisible(False)
+        self.reg_success.setVisible(False)
+        
+        # Делаем запрос
+        data = {"email": email, "password": password, "role": "user"}
+        result, error = self._make_request("/auth/register", data)
+        
+        self.register_btn.setEnabled(True)
+        self.register_btn.setText("Зарегистрироваться")
+        
+        if error:
+            self.reg_error.setText(error)
+            self.reg_error.setVisible(True)
+            return
+        
+        # Успешная регистрация
+        self.reg_success.setText(f"Регистрация успешна! Теперь войдите с email: {email}")
+        self.reg_success.setVisible(True)
+        
+        # Копируем email в форму входа
+        self.login_email.setText(email)
+        
+        # Очищаем форму регистрации
+        self.reg_email.clear()
+        self.reg_password.clear()
+        self.reg_password2.clear()
+    
+    def logout(self):
+        """Выход из системы"""
+        auth_manager.clear()
+        self._update_auth_status()
+        self.auth_changed.emit(False)
+    
+    def _update_auth_status(self):
+        """Обновить отображение статуса авторизации"""
+        if auth_manager.is_authenticated():
+            self.status_label.setText("Вы авторизованы")
+            self.status_label.setStyleSheet("font-size: 16px; color: #3fb950;")
+            self.user_info_label.setText(f"Email: {auth_manager.user_email}")
+            self.user_info_label.setVisible(True)
+            self.logout_btn.setVisible(True)
+            
+            # Скрываем формы
+            self.login_btn.setEnabled(False)
+            self.register_btn.setEnabled(False)
+        else:
+            self.status_label.setText("Вы не авторизованы")
+            self.status_label.setStyleSheet("font-size: 16px; color: #8b949e;")
+            self.user_info_label.setVisible(False)
+            self.logout_btn.setVisible(False)
+            
+            # Показываем формы
+            self.login_btn.setEnabled(True)
+            self.register_btn.setEnabled(True)
 
 
 class FullscreenVideoDialog(QDialog):
@@ -126,6 +889,62 @@ class FullscreenVideoDialog(QDialog):
         event.accept()
 
 
+class GazeOverlayWindow(QWidget):
+    """Отдельное окно-оверлей для карты взгляда поверх видео"""
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.gaze_points = []
+        self.current_x = None
+        self.current_y = None
+    
+    def set_data(self, points):
+        self.gaze_points = points
+        self.update()
+    
+    def set_current_position(self, x, y):
+        self.current_x = x
+        self.current_y = y
+        self.update()
+    
+    def clear_current_position(self):
+        self.current_x = None
+        self.current_y = None
+        self.update()
+    
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        area_rect = self.rect().adjusted(10, 10, -10, -10)
+        
+        # Только текущая позиция взгляда (без истории)
+        if self.current_x is not None and self.current_y is not None:
+            px = area_rect.left() + int(self.current_x * area_rect.width())
+            py = area_rect.top() + int(self.current_y * area_rect.height())
+            
+            # Свечение
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor(255, 255, 0, 60)))
+            painter.drawEllipse(px - 20, py - 20, 40, 40)
+            
+            # Средний круг
+            painter.setBrush(QBrush(QColor(255, 200, 0, 150)))
+            painter.drawEllipse(px - 12, py - 12, 24, 24)
+            
+            # Центр
+            painter.setBrush(QBrush(QColor("#ffcc00")))
+            painter.drawEllipse(px - 6, py - 6, 12, 12)
+            
+            # Перекрестие
+            painter.setPen(QPen(QColor(255, 255, 255, 220), 2))
+            painter.drawLine(px - 25, py, px - 9, py)
+            painter.drawLine(px + 9, py, px + 25, py)
+            painter.drawLine(px, py - 25, px, py - 9)
+            painter.drawLine(px, py + 9, px, py + 25)
+
+
 class ResultsFullscreenDialog(QDialog):
     """Полноэкранный просмотр результатов с картой взгляда"""
     position_changed = pyqtSignal(int)
@@ -146,25 +965,9 @@ class ResultsFullscreenDialog(QDialog):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
         
-        # Контейнер для видео (без layout, чтобы оверлей работал)
-        self.video_container = QWidget()
-        self.video_container.setStyleSheet("background-color: black;")
-        
         # Видео виджет
-        self.video_widget = QVideoWidget(self.video_container)
-        
-        # Карта взгляда как оверлей поверх видео
-        self.gaze_overlay = GazeHeatmapWidget(overlay_mode=True)
-        self.gaze_overlay.setParent(self.video_container)
-        self.gaze_overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        
-        # Загружаем все точки взгляда
-        gaze_points = [(gaze_x[i], gaze_y[i], times[i]) 
-                       for i in range(len(times)) 
-                       if gaze_x[i] > 0 or gaze_y[i] > 0]
-        self.gaze_overlay.set_data(gaze_points)
-        
-        main_layout.addWidget(self.video_container, stretch=1)
+        self.video_widget = QVideoWidget()
+        main_layout.addWidget(self.video_widget, stretch=1)
         
         # Панель управления внизу
         controls = QWidget()
@@ -216,6 +1019,15 @@ class ResultsFullscreenDialog(QDialog):
         """)
         self.hint_label.adjustSize()
         
+        # Создаём отдельное окно-оверлей для карты взгляда
+        self.gaze_overlay = GazeOverlayWindow()
+        
+        # Загружаем точки взгляда
+        gaze_points = [(gaze_x[i], gaze_y[i], times[i]) 
+                       for i in range(len(times)) 
+                       if gaze_x[i] > 0 or gaze_y[i] > 0]
+        self.gaze_overlay.set_data(gaze_points)
+        
         # Подключаем сигналы плеера
         self.media_player.positionChanged.connect(self._on_position)
         self.media_player.durationChanged.connect(self._on_duration)
@@ -231,16 +1043,19 @@ class ResultsFullscreenDialog(QDialog):
         self.update_timer.start()
         
         self.showFullScreen()
-        QTimer.singleShot(200, self._position_elements)
+        QTimer.singleShot(300, self._position_elements)
     
     def _position_elements(self):
-        # Видео и оверлей на всю область контейнера
-        w = self.video_container.width()
-        h = self.video_container.height()
+        # Позиционируем оверлей поверх видео
+        video_geom = self.video_widget.geometry()
+        global_pos = self.video_widget.mapToGlobal(video_geom.topLeft())
         
-        self.video_widget.setGeometry(0, 0, w, h)
-        self.gaze_overlay.setGeometry(0, 0, w, h)
-        self.gaze_overlay.raise_()
+        self.gaze_overlay.setGeometry(
+            global_pos.x(), 
+            global_pos.y(), 
+            video_geom.width(), 
+            video_geom.height() - 60  # Минус панель управления
+        )
         self.gaze_overlay.show()
         
         # Подсказка вверху по центру
@@ -256,6 +1071,10 @@ class ResultsFullscreenDialog(QDialog):
         else:
             self.gaze_overlay.hide()
             self.toggle_gaze_btn.setText("Взгляд: ВЫКЛ")
+    
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        QTimer.singleShot(50, self._position_elements)
     
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -331,26 +1150,23 @@ class ResultsFullscreenDialog(QDialog):
     
     def closeEvent(self, event):
         self.update_timer.stop()
+        self.gaze_overlay.close()
         self.media_player.setVideoOutput(self.original_output)
         event.accept()
 
 
 class GazeHeatmapWidget(QWidget):
     """Виджет для отображения тепловой карты взгляда (16:10 как экран)"""
-    ASPECT_RATIO = 16 / 10  # Соотношение сторон экрана
+    ASPECT_RATIO = 16 / 10
     
     def __init__(self, overlay_mode=False):
         super().__init__()
-        self.overlay_mode = overlay_mode  # Режим наложения на видео
+        self.overlay_mode = overlay_mode
         self.setMinimumSize(160, 100)
         self.gaze_points = []
         self.current_x = None
         self.current_y = None
-        
-        if overlay_mode:
-            # Оверлей с полупрозрачным фоном
-            self.setAutoFillBackground(False)
-        else:
+        if not overlay_mode:
             self.setStyleSheet("background-color: #0d1117; border-radius: 8px;")
     
     def set_data(self, points):
@@ -358,99 +1174,73 @@ class GazeHeatmapWidget(QWidget):
         self.update()
     
     def set_current_position(self, x, y):
-        """Установить текущую позицию взгляда"""
         self.current_x = x
         self.current_y = y
         self.update()
     
     def clear_current_position(self):
-        """Очистить текущую позицию"""
         self.current_x = None
         self.current_y = None
         self.update()
     
     def _get_screen_rect(self):
-        """Получить прямоугольник экрана 16:10 с отступами"""
+        from PyQt6.QtCore import QRect
         margin = 5 if self.overlay_mode else 10
         available_w = self.width() - margin * 2
         available_h = self.height() - margin * 2
-        
         if self.overlay_mode:
-            # В режиме наложения занимаем всю область
-            from PyQt6.QtCore import QRect
             return QRect(margin, margin, available_w, available_h)
-        
-        # Вычисляем размер с сохранением пропорций 16:10
         if available_w / available_h > self.ASPECT_RATIO:
             h = available_h
             w = int(h * self.ASPECT_RATIO)
         else:
             w = available_w
             h = int(w / self.ASPECT_RATIO)
-        
         x = (self.width() - w) // 2
         y = (self.height() - h) // 2
-        
-        from PyQt6.QtCore import QRect
         return QRect(x, y, w, h)
     
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
         if self.overlay_mode:
-            # Полупрозрачный тёмный фон для лучшей видимости точек
             painter.fillRect(self.rect(), QColor(0, 0, 0, 40))
         else:
             painter.fillRect(self.rect(), QColor("#0d1117"))
-        
-        # Область экрана
         area_rect = self._get_screen_rect()
-        
         if not self.overlay_mode:
-            # Рамка экрана (только в обычном режиме)
             painter.setPen(QPen(QColor("#30363d"), 2))
             painter.setBrush(QBrush(QColor("#161b22")))
             painter.drawRect(area_rect)
-            
-            # Сетка 4x4
             painter.setPen(QPen(QColor("#21262d"), 1))
             for i in range(1, 4):
                 x = area_rect.left() + (area_rect.width() * i // 4)
                 painter.drawLine(x, area_rect.top(), x, area_rect.bottom())
                 y = area_rect.top() + (area_rect.height() * i // 4)
                 painter.drawLine(area_rect.left(), y, area_rect.right(), y)
-        
         if not self.gaze_points and self.current_x is None:
             if not self.overlay_mode:
                 painter.setPen(QColor("#8b949e"))
                 painter.drawText(area_rect, Qt.AlignmentFlag.AlignCenter, "Нет данных")
             return
-        
-        # Рисуем историю точек (полупрозрачные)
         total = len(self.gaze_points)
-        for i, (x, y, _) in enumerate(self.gaze_points):
-            px = area_rect.left() + int(x * area_rect.width())
-            py = area_rect.top() + int(y * area_rect.height())
-            
+        for i, (gx, gy, _) in enumerate(self.gaze_points):
+            px = area_rect.left() + int(gx * area_rect.width())
+            py = area_rect.top() + int(gy * area_rect.height())
             progress = i / total if total > 0 else 0
-            
             if self.overlay_mode:
-                # Более яркие цвета для оверлея
-                r = int(100 + progress * (255 - 100))
+                r = int(100 + progress * 155)
                 g = int(200 - progress * 150)
-                b = int(255 - progress * (255 - 100))
+                b = int(255 - progress * 155)
                 alpha = 100 + int(progress * 80)
             else:
-                r = int(88 + progress * (248 - 88))
+                r = int(88 + progress * 160)
                 g = int(166 - progress * 166)
-                b = int(255 - progress * (255 - 81))
+                b = int(255 - progress * 174)
                 alpha = 80
-            
             color = QColor(r, g, b, alpha)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QBrush(color))
-            
             size = 4 + int(progress * 4) if self.overlay_mode else 3 + int(progress * 3)
             painter.drawEllipse(px - size//2, py - size//2, size, size)
         
@@ -464,50 +1254,43 @@ class GazeHeatmapWidget(QWidget):
                 # Внешний круг (яркое свечение)
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QBrush(QColor(255, 255, 0, 80)))
-                painter.drawEllipse(px - 30, py - 30, 60, 60)
+                painter.drawEllipse(px - 15, py - 15, 30, 30)
                 
                 # Средний круг
                 painter.setBrush(QBrush(QColor(255, 200, 0, 150)))
-                painter.drawEllipse(px - 18, py - 18, 36, 36)
+                painter.drawEllipse(px - 9, py - 9, 18, 18)
                 
                 # Центральная точка
                 painter.setBrush(QBrush(QColor("#ffcc00")))
-                painter.drawEllipse(px - 8, py - 8, 16, 16)
+                painter.drawEllipse(px - 4, py - 4, 8, 8)
                 
                 # Перекрестие (белое для контраста)
-                painter.setPen(QPen(QColor(255, 255, 255, 200), 3))
-                painter.drawLine(px - 35, py, px - 12, py)
-                painter.drawLine(px + 12, py, px + 35, py)
-                painter.drawLine(px, py - 35, px, py - 12)
-                painter.drawLine(px, py + 12, px, py + 35)
-                
-                # Обводка перекрестия
-                painter.setPen(QPen(QColor(0, 0, 0, 150), 1))
-                painter.drawLine(px - 36, py, px - 11, py)
-                painter.drawLine(px + 11, py, px + 36, py)
-                painter.drawLine(px, py - 36, px, py - 11)
-                painter.drawLine(px, py + 11, px, py + 36)
+                painter.setPen(QPen(QColor(255, 255, 255, 200), 2))
+                painter.drawLine(px - 18, py, px - 6, py)
+                painter.drawLine(px + 6, py, px + 18, py)
+                painter.drawLine(px, py - 18, px, py - 6)
+                painter.drawLine(px, py + 6, px, py + 18)
             else:
                 # Обычный маркер
                 # Внешний круг (свечение)
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QBrush(QColor(248, 81, 73, 60)))
-                painter.drawEllipse(px - 20, py - 20, 40, 40)
+                painter.drawEllipse(px - 10, py - 10, 20, 20)
                 
                 # Средний круг
                 painter.setBrush(QBrush(QColor(248, 81, 73, 120)))
-                painter.drawEllipse(px - 12, py - 12, 24, 24)
+                painter.drawEllipse(px - 6, py - 6, 12, 12)
                 
                 # Центральная точка
                 painter.setBrush(QBrush(QColor("#f85149")))
-                painter.drawEllipse(px - 6, py - 6, 12, 12)
+                painter.drawEllipse(px - 3, py - 3, 6, 6)
                 
                 # Перекрестие
-                painter.setPen(QPen(QColor("#f85149"), 2))
-                painter.drawLine(px - 25, py, px - 8, py)
-                painter.drawLine(px + 8, py, px + 25, py)
-                painter.drawLine(px, py - 25, px, py - 8)
-                painter.drawLine(px, py + 8, px, py + 25)
+                painter.setPen(QPen(QColor("#f85149"), 1))
+                painter.drawLine(px - 12, py, px - 4, py)
+                painter.drawLine(px + 4, py, px + 12, py)
+                painter.drawLine(px, py - 12, px, py - 4)
+                painter.drawLine(px, py + 4, px, py + 12)
 
 
 class ResultsTab(QWidget):
@@ -521,6 +1304,7 @@ class ResultsTab(QWidget):
         self.times = []
         self.attention = []
         self.relaxation = []
+        self.audio_level = []
         self.alpha = []
         self.beta = []
         self.theta = []
@@ -647,20 +1431,21 @@ class ResultsTab(QWidget):
         
         # Metric cards
         cards_widget = QWidget()
-        cards_widget.setFixedHeight(80)
+        cards_widget.setFixedHeight(60)
         cards_layout = QHBoxLayout(cards_widget)
         cards_layout.setContentsMargins(0, 0, 0, 0)
-        cards_layout.setSpacing(8)
+        cards_layout.setSpacing(6)
         
         self.cur_attention = MetricCard("Внимание", "--", "#58a6ff", size="small")
         self.cur_relaxation = MetricCard("Расслаб.", "--", "#a371f7", size="small")
+        self.cur_audio = MetricCard("Аудио", "--", "#d29922", size="small")
         self.cur_alpha = MetricCard("Альфа", "--", "#3fb950", size="small")
         self.cur_beta = MetricCard("Бета", "--", "#f0883e", size="small")
         self.cur_theta = MetricCard("Тета", "--", "#d29922", size="small")
         self.cur_gaze_x = MetricCard("Взгляд X", "--", "#8b949e", size="small")
         self.cur_gaze_y = MetricCard("Взгляд Y", "--", "#8b949e", size="small")
         
-        for card in [self.cur_attention, self.cur_relaxation, self.cur_alpha, self.cur_beta, self.cur_theta, self.cur_gaze_x, self.cur_gaze_y]:
+        for card in [self.cur_attention, self.cur_relaxation, self.cur_audio, self.cur_alpha, self.cur_beta, self.cur_theta, self.cur_gaze_x, self.cur_gaze_y]:
             cards_layout.addWidget(card)
         cards_layout.addStretch()
         scroll_layout.addWidget(cards_widget)
@@ -693,6 +1478,20 @@ class ResultsTab(QWidget):
         self.spectral_plot.addItem(self.spectral_vline)
         spectral_layout.addWidget(self.spectral_plot)
         scroll_layout.addWidget(spectral_group)
+        
+        # Audio graph
+        audio_group = QGroupBox("Уровень аудио")
+        audio_group.setFixedHeight(120)
+        audio_layout = QVBoxLayout(audio_group)
+        audio_layout.setContentsMargins(8, 20, 8, 8)
+        self.audio_plot = pg.PlotWidget()
+        self.audio_plot.setBackground('#161b22')
+        self.audio_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.audio_plot.setYRange(0, 100)
+        self.audio_vline = pg.InfiniteLine(angle=90, pen=pg.mkPen('#f85149', width=2))
+        self.audio_plot.addItem(self.audio_vline)
+        audio_layout.addWidget(self.audio_plot)
+        scroll_layout.addWidget(audio_group)
         
         # Gaze graph
         gaze_group = QGroupBox("Позиция взгляда")
@@ -855,8 +1654,10 @@ class ResultsTab(QWidget):
             
             attention_val = record.get('attention', 0)
             relaxation_val = record.get('relaxation', 0)
+            audio_val = record.get('audio_level', 0)
             self.cur_attention.set_value(f"{attention_val:.0f}%" if attention_val else "--")
             self.cur_relaxation.set_value(f"{relaxation_val:.0f}%" if relaxation_val else "--")
+            self.cur_audio.set_value(f"{audio_val:.0f}%" if audio_val else "--")
             self.cur_alpha.set_value(f"{record.get('alpha', 0)}%")
             self.cur_beta.set_value(f"{record.get('beta', 0)}%")
             self.cur_theta.set_value(f"{record.get('theta', 0)}%")
@@ -874,6 +1675,7 @@ class ResultsTab(QWidget):
             
             self.mental_vline.setPos(elapsed)
             self.spectral_vline.setPos(elapsed)
+            self.audio_vline.setPos(elapsed)
             self.gaze_vline.setPos(elapsed)
     
     def update_graphs(self):
@@ -883,6 +1685,7 @@ class ResultsTab(QWidget):
         self.times = []
         self.attention = []
         self.relaxation = []
+        self.audio_level = []
         self.alpha = []
         self.beta = []
         self.theta = []
@@ -894,6 +1697,7 @@ class ResultsTab(QWidget):
                 self.times.append(float(row.get('elapsed_sec', 0)))
                 self.attention.append(float(row.get('attention', 0)))
                 self.relaxation.append(float(row.get('relaxation', 0)))
+                self.audio_level.append(float(row.get('audio_level', 0)))
                 self.alpha.append(float(row.get('alpha', 0)))
                 self.beta.append(float(row.get('beta', 0)))
                 self.theta.append(float(row.get('theta', 0)))
@@ -916,6 +1720,11 @@ class ResultsTab(QWidget):
             self.spectral_plot.plot(self.times, self.alpha, pen=pg.mkPen('#3fb950', width=2))
             self.spectral_plot.plot(self.times, self.beta, pen=pg.mkPen('#f0883e', width=2))
             self.spectral_plot.plot(self.times, self.theta, pen=pg.mkPen('#d29922', width=2))
+        
+        self.audio_plot.clear()
+        self.audio_plot.addItem(self.audio_vline)
+        if self.times:
+            self.audio_plot.plot(self.times, self.audio_level, pen=pg.mkPen('#d29922', width=2), name='Аудио')
         
         self.gaze_plot.clear()
         self.gaze_plot.addItem(self.gaze_vline)
@@ -1319,27 +2128,9 @@ class MonitoringTab(QWidget):
         self.electrode_warning.setVisible(False)
         layout.addWidget(self.electrode_warning)
         
-        # Electrode status
-        electrode_widget = QWidget()
-        electrode_widget.setFixedHeight(24)
-        electrode_layout = QHBoxLayout(electrode_widget)
-        electrode_layout.setContentsMargins(0, 0, 0, 0)
-        electrode_layout.setSpacing(4)
-        
-        electrode_layout.addWidget(QLabel("Электроды:"))
-        self.o1_status = QLabel("O1: —")
-        self.o2_status = QLabel("O2: —")
-        self.t3_status = QLabel("T3: —")
-        self.t4_status = QLabel("T4: —")
-        for lbl in [self.o1_status, self.o2_status, self.t3_status, self.t4_status]:
-            lbl.setStyleSheet("color: #8b949e; font-size: 12px; margin: 0 6px;")
-            electrode_layout.addWidget(lbl)
-        electrode_layout.addStretch()
-        layout.addWidget(electrode_widget)
-        
         # Metric cards
         cards_widget = QWidget()
-        cards_widget.setFixedHeight(90)
+        cards_widget.setFixedHeight(80)
         cards_layout = QHBoxLayout(cards_widget)
         cards_layout.setContentsMargins(0, 0, 0, 0)
         cards_layout.setSpacing(10)
@@ -1471,6 +2262,7 @@ class VideoRecordingTab(QWidget):
         self.record_count_value = 0
         self.current_brain_data = {}
         self.current_gaze_data = None
+        self.current_audio_level = 0.0
         self.video_loaded = False
         self.video_file_path = None
         self.camera_active = False
@@ -1696,20 +2488,48 @@ class VideoRecordingTab(QWidget):
         record_layout.addWidget(status_widget)
         
         values_widget = QWidget()
-        values_widget.setFixedHeight(70)
+        values_widget.setFixedHeight(60)
         values_layout = QHBoxLayout(values_widget)
         values_layout.setContentsMargins(0, 0, 0, 0)
-        values_layout.setSpacing(8)
+        values_layout.setSpacing(6)
         self.rec_attention = MetricCard("Внимание", "—", "#58a6ff", size="small")
         self.rec_relaxation = MetricCard("Расслаб.", "—", "#a371f7", size="small")
         self.rec_gaze_x = MetricCard("Взгляд X", "—", "#8b949e", size="small")
         self.rec_gaze_y = MetricCard("Взгляд Y", "—", "#8b949e", size="small")
+        self.rec_audio = MetricCard("Аудио", "—", "#d29922", size="small")
         values_layout.addWidget(self.rec_attention)
         values_layout.addWidget(self.rec_relaxation)
         values_layout.addWidget(self.rec_gaze_x)
         values_layout.addWidget(self.rec_gaze_y)
+        values_layout.addWidget(self.rec_audio)
         values_layout.addStretch()
         record_layout.addWidget(values_widget)
+        
+        # Audio section
+        audio_widget = QWidget()
+        audio_widget.setFixedHeight(80)
+        audio_layout = QHBoxLayout(audio_widget)
+        audio_layout.setContentsMargins(0, 0, 0, 0)
+        audio_layout.setSpacing(8)
+        
+        audio_label = QLabel("Микрофон:")
+        audio_label.setStyleSheet("color: #8b949e; font-size: 11px;")
+        audio_label.setFixedWidth(65)
+        audio_layout.addWidget(audio_label)
+        
+        self.audio_level = AudioLevelWidget()
+        self.audio_level.setFixedWidth(30)
+        audio_layout.addWidget(self.audio_level)
+        
+        self.audio_spectrum = AudioSpectrumWidget()
+        audio_layout.addWidget(self.audio_spectrum, stretch=1)
+        
+        self.audio_status_label = QLabel("Выкл")
+        self.audio_status_label.setStyleSheet("color: #8b949e; font-size: 11px;")
+        self.audio_status_label.setFixedWidth(40)
+        audio_layout.addWidget(self.audio_status_label)
+        
+        record_layout.addWidget(audio_widget)
         
         layout.addWidget(record_group)
         layout.addStretch()
@@ -1745,6 +2565,21 @@ class VideoRecordingTab(QWidget):
         eye_tracker.tracking_started.connect(self.on_tracking_started)
         eye_tracker.tracking_stopped.connect(self.on_tracking_stopped)
         eye_tracker.error_occurred.connect(self.on_tracking_error)
+        
+        # Audio signals
+        audio_analyzer.level_changed.connect(self._on_audio_level)
+        audio_analyzer.spectrum_ready.connect(self._on_audio_spectrum)
+    
+    def _on_audio_level(self, level):
+        """Обновление уровня громкости"""
+        self.audio_level.set_level(level)
+        if level > 0:
+            self.rec_audio.set_value(f"{int(level)}%")
+        self.current_audio_level = level
+    
+    def _on_audio_spectrum(self, spectrum):
+        """Обновление спектра"""
+        self.audio_spectrum.set_spectrum(spectrum)
     
     def select_video(self):
         filename, _ = QFileDialog.getOpenFileName(self, "Выбрать видео", "", "Видео (*.mp4 *.avi *.mkv *.mov)")
@@ -1970,6 +2805,14 @@ class VideoRecordingTab(QWidget):
             brain_bit_controller.isArtefacted.connect(on_artifact)
             brain_bit_controller.start_calculations(addr)
         
+        # Запуск захвата аудио
+        if audio_analyzer.start_capture():
+            self.audio_status_label.setText("ВКЛ")
+            self.audio_status_label.setStyleSheet("color: #3fb950; font-size: 11px;")
+        else:
+            self.audio_status_label.setText("Нет")
+            self.audio_status_label.setStyleSheet("color: #f85149; font-size: 11px;")
+        
         self.record_timer.start(100)
         self.record_status.setText("ЗАПИСЬ")
         self.record_status.setStyleSheet("color: #f85149; font-weight: 600;")
@@ -1990,6 +2833,7 @@ class VideoRecordingTab(QWidget):
             'video_ms': video_pos,
             'attention': self.current_brain_data.get('attention', 0),
             'relaxation': self.current_brain_data.get('relaxation', 0),
+            'audio_level': round(self.current_audio_level, 1),
             'alpha': self.current_brain_data.get('alpha', 0),
             'beta': self.current_brain_data.get('beta', 0),
             'theta': self.current_brain_data.get('theta', 0),
@@ -2008,6 +2852,14 @@ class VideoRecordingTab(QWidget):
     def stop_recording(self):
         self.is_recording = False
         self.record_timer.stop()
+        
+        # Остановка захвата аудио
+        audio_analyzer.stop_capture()
+        self.audio_status_label.setText("Выкл")
+        self.audio_status_label.setStyleSheet("color: #8b949e; font-size: 11px;")
+        self.audio_level.reset()
+        self.audio_spectrum.reset()
+        self.rec_audio.set_value("—")
         
         self.electrode_warning.setVisible(False)
         
@@ -2076,11 +2928,13 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         
+        self.auth_tab = AuthTab()
         self.connection_tab = ConnectionTab()
         self.monitoring_tab = MonitoringTab()
         self.video_tab = VideoRecordingTab()
         self.results_tab = ResultsTab()
         
+        self.tabs.addTab(self.auth_tab, "Авторизация")
         self.tabs.addTab(self.connection_tab, "Подключение")
         self.tabs.addTab(self.monitoring_tab, "Мониторинг")
         self.tabs.addTab(self.video_tab, "Видео + Взгляд")

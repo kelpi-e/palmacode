@@ -17,15 +17,15 @@ class MetricCard(QFrame):
         self.size = size
         
         if size == self.SIZE_SMALL:
-            self.value_font_size = 18
-            self.title_font_size = 10
-            self.setFixedWidth(100)
-            self.setFixedHeight(60)
+            self.value_font_size = 14
+            self.title_font_size = 8
+            self.setFixedWidth(90)
+            self.setFixedHeight(50)
         else:
-            self.value_font_size = 28
-            self.title_font_size = 11
-            self.setMinimumWidth(120)
-            self.setFixedHeight(80)
+            self.value_font_size = 22
+            self.title_font_size = 9
+            self.setMinimumWidth(100)
+            self.setFixedHeight(70)
         
         layout = QVBoxLayout(self)
         layout.setSpacing(2)
