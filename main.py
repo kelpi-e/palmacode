@@ -278,12 +278,18 @@ class ResultsTab(QWidget):
         video_container.setStyleSheet("QFrame { background-color: #000; border: 2px solid #30363d; border-radius: 12px; }")
         video_layout = QVBoxLayout(video_container)
         video_layout.setContentsMargins(4, 4, 4, 4)
+        video_layout.setSpacing(4)
         
         self.video_widget = QVideoWidget()
         self.video_widget.setMinimumSize(500, 280)
-        video_layout.addWidget(self.video_widget)
+        video_layout.addWidget(self.video_widget, stretch=1)
         
-        controls_layout = QHBoxLayout()
+        # Controls container to prevent video overlap
+        controls_widget = QWidget()
+        controls_widget.setFixedHeight(40)
+        controls_widget.setStyleSheet("background-color: transparent;")
+        controls_layout = QHBoxLayout(controls_widget)
+        controls_layout.setContentsMargins(4, 4, 4, 4)
         self.play_btn = QPushButton(">")
         self.play_btn.setFixedWidth(50)
         self.play_btn.setEnabled(False)
@@ -296,7 +302,7 @@ class ResultsTab(QWidget):
         controls_layout.addWidget(self.play_btn)
         controls_layout.addWidget(self.video_slider)
         controls_layout.addWidget(self.time_label)
-        video_layout.addLayout(controls_layout)
+        video_layout.addWidget(controls_widget, stretch=0)
         
         top_layout.addWidget(video_container, stretch=2)
         

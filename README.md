@@ -1,195 +1,203 @@
-# Python + BrainBit + Emotions using PyQt
+# BrainBit Monitor
 
-## Настройка проекта
+Приложение для мониторинга мозговой активности и трекинга взгляда в реальном времени с возможностью синхронизации с видеоматериалами.
 
-Перед первым запуском необходимо установить зависимые бибилотеки:
+![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
+![PyQt6](https://img.shields.io/badge/PyQt6-6.0+-green.svg)
+![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
+## Возможности
+
+- **Подключение BrainBit** — поиск и подключение устройств BrainBit через Bluetooth
+- **Проверка контакта электродов** — мониторинг качества наложения электродов (O1, O2, T3, T4)
+- **Калибровка** — автоматическая калибровка для получения точных данных
+- **Мониторинг в реальном времени** — отображение внимания, альфа/бета/тета ритмов
+- **Трекинг взгляда** — определение направления взгляда через веб-камеру
+- **Синхронная запись** — одновременная запись данных мозга и взгляда при просмотре видео
+- **Просмотр результатов** — анализ записей с синхронизацией по видео
+
+## Требования
+
+- Python 3.9+
+- Устройство BrainBit
+- Веб-камера (для трекинга взгляда)
+- Windows 10/11
+
+## Установка
+
+### 1. Клонирование репозитория
+
+```bash
+git clone <https://github.com/kelpi-e/palmacode.git>
+cd palmacode
 ```
-pip install pyneurosdk2
-pip install pyem-st-artifacts
-pip install PyQt6
+
+### 2. Создание виртуального окружения (рекомендуется)
+
+```bash
+python -m venv venv
+venv\Scripts\activate
 ```
+
+### 3. Установка зависимостей
+
+```bash
+pip install -r requirements.txt
+```
+
+### Зависимости
+
+| Пакет | Назначение |
+|-------|------------|
+| `pyneurosdk2` | SDK для работы с нейроинтерфейсами |
+| `pyem-st-artifacts` | Обнаружение артефактов в сигнале |
+| `PyQt6` | Графический интерфейс |
+| `PyQt6-WebEngine` | Веб-компоненты |
+| `pyqtgraph` | Графики в реальном времени |
+| `numpy` | Числовые вычисления |
+| `opencv-python` | Работа с камерой и трекинг |
+
+## Запуск
+
+```bash
+python main.py
+```
+
+## Использование
+
+### Вкладка «Подключение»
+
+1. Нажмите **«Начать поиск»** для обнаружения устройств BrainBit
+2. Выберите устройство из списка для подключения
+3. Нажмите **«Начать проверку»** для проверки контакта электродов
+4. Убедитесь, что все индикаторы (O1, O2, T3, T4) зелёные
+5. Нажмите **«Начать калибровку»** и дождитесь завершения
+
+### Вкладка «Мониторинг»
+
+- Отображает данные в реальном времени:
+  - **Внимание** — уровень концентрации (0-100%)
+  - **Альфа** — расслабление, медитация
+  - **Бета** — активное мышление, концентрация
+  - **Тета** — дремота, творчество
+
+### Вкладка «Видео + Взгляд»
+
+1. Загрузите видеофайл (MP4, AVI, MKV, MOV)
+2. Нажмите **«Тест камеры»** для проверки веб-камеры
+3. Выполните **«Калибровку»** трекинга взгляда
+4. Нажмите **«НАЧАТЬ ЗАПИСЬ»** — видео откроется на полный экран
+5. После просмотра нажмите **«СТОП»** — данные сохранятся автоматически
+
+### Вкладка «Результаты»
+
+1. Загрузите JSON-файл с результатами записи
+2. Загрузите соответствующее видео (опционально)
+3. Используйте плеер для навигации — графики синхронизируются с видео
+4. Анализируйте:
+   - Графики внимания и спектральных данных
+   - Тепловую карту взгляда
+   - Значения метрик в каждый момент времени
 
 ## Структура проекта
 
-Проект состоит из трех файлов:
-1. файл интерфейса [Mainwindow.ui](https://gitlab.com/neurosdk2/cybergarden2025/-/tree/main/students/PythonDemo%20(PyQt)/ui?ref_type=heads). В нем ничего интересного
-2. Точка входа в приложение [main.py](https://gitlab.com/neurosdk2/cybergarden2025/-/blob/main/students/PythonDemo%20(PyQt)/main.py?ref_type=heads). В нем же находится описание интерфейса и вывод рассчитанных дначений в интерфейс
-3. самый важный файл [brain_bit_controller.py](https://gitlab.com/neurosdk2/cybergarden2025/-/blob/main/students/PythonDemo%20(PyQt)/brain_bit_controller.py?ref_type=heads)
+```
+palmacode/
+├── main.py                 # Главное приложение и интерфейс
+├── brain_bit_controller.py # Контроллер устройства BrainBit
+├── eye_tracker.py          # Модуль трекинга взгляда
+├── styles.py               # Стили интерфейса
+├── widgets.py              # Кастомные виджеты
+├── requirements.txt        # Зависимости
+├── reports/                # Папка с отчётами записей
+│   └── report_*.json       # JSON-файлы с данными
+├── logs/                   # Логи SDK
+└── ui/                     # UI файлы (опционально)
+```
 
-**BrainBitController** - это основной класс, на который нужно обратить внимание. В нем происходит все взаимодействие с девайсом BrainBit, а так же получение эмоциональных состояний из дополнитеной библиотеки. Каждый метод ожидает одним из аргументов мак-адрес устройства. Это означает, что объект **BrainBitController** хранит в себе все подключенные подльзователем устройства и различает их по мак-адресу. Все оповещения помимо основной информации так же отправляют мак-адрес устройства, от которого пришло это оповещение. Этот класс должен быть синглтоном, поэтому сразу после имплементации заведена переменная [brain_bit_controller](https://gitlab.com/neurosdk2/cybergarden2025/-/blob/main/students/PythonDemo%20(PyQt)/brain_bit_controller.py?ref_type=heads#L316), с помощью которой нужно обращаться к контроллеру.
+## Формат данных записи
 
-#### Поиск устройства
+Записи сохраняются в JSON формате:
 
-Поиск представлен методом **search_with_result** с аргументами:
+```json
+{
+  "created_at": "2025-12-06T11:29:37.123456",
+  "ended_at": "2025-12-06T11:35:42.654321",
+  "video_file": "stimulus.mp4",
+  "video_path": "C:/Videos/stimulus.mp4",
+  "total_records": 3600,
+  "records": [
+    {
+      "timestamp": "2025-12-06T11:29:37.223456",
+      "elapsed_sec": 0.1,
+      "video_ms": 100,
+      "attention": 45.5,
+      "alpha": 35,
+      "beta": 40,
+      "theta": 25,
+      "gaze_x": 0.52,
+      "gaze_y": 0.48,
+      "gaze_h": "center",
+      "gaze_v": "center",
+      "left_eye": true,
+      "right_eye": true
+    }
+  ]
+}
+```
 
-1. время поиска. Указывается в секундах. Тип данных **int**
-2. список мак-адресов устройств для поиска. Если передать пустой список - найдутся все девайся типа BrainBit. Тим данных - **List[str]**.
+### Описание полей записи
 
-Эта функция асинхронна. Чтобы получить список найденных девайсов нужно подключиться к нужному сигналу.
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `timestamp` | string | Абсолютное время записи (ISO 8601) |
+| `elapsed_sec` | float | Секунды от начала записи |
+| `video_ms` | int | Позиция видео в миллисекундах |
+| `attention` | float | Уровень внимания (0-100%) |
+| `alpha` | int | Альфа-ритм (0-100%) |
+| `beta` | int | Бета-ритм (0-100%) |
+| `theta` | int | Тета-ритм (0-100%) |
+| `gaze_x` | float | Координата взгляда X (0-1) |
+| `gaze_y` | float | Координата взгляда Y (0-1) |
+| `gaze_h` | string | Горизонтальное направление (left/center/right) |
+| `gaze_v` | string | Вертикальное направление (up/center/down) |
+| `left_eye` | bool | Левый глаз открыт |
+| `right_eye` | bool | Правый глаз открыт |
 
-Как использовать:
+## Горячие клавиши
 
-1. подключиться к сигналу:
-    ```python
-    def on_bb_founded(sensors: list[BrainBitInfo]):
-        pass
+| Клавиша | Действие |
+|---------|----------|
+| `F` | Полноэкранный режим видео |
+| `Esc` | Выход из полноэкранного режима |
+| `Пробел` | Пауза/воспроизведение |
 
-    brain_bit_controller.founded.connect(on_bb_founded)
-    ``` 
+## Устранение неполадок
 
-2. запустить поиск устройств:
-    ```python
-    brain_bit_controller.search_with_result(5, [])
-    ``` 
+### Устройство BrainBit не найдено
+- Убедитесь, что Bluetooth включён
+- Проверьте заряд батареи устройства
+- Перезагрузите устройство (выключите и включите)
 
-В примере кода показан поиск любого девайса в течении 5 сек.
+### Плохой контакт электродов
+- Смочите электроды физраствором или водой
+- Убедитесь, что устройство плотно прилегает к голове
+- Проверьте чистоту электродов
 
-Список найденных девайсов приходит в списке типа **list[BrainBitInfo]**. **BrainBitInfo** содержит два значимых поля:
- 1. Имя девайса. Тип данных **str**
- 2. Мак-адрес девайса. Тип данных **str**
+### Ошибка калибровки
+- Сидите неподвижно во время калибровки
+- Избегайте моргания и движений глаз
+- Убедитесь в хорошем контакте всех электродов
 
+### Камера не запускается
+- Проверьте, что камера не используется другим приложением
+- Убедитесь в наличии драйверов камеры
+- Попробуйте другой USB-порт
 
-#### Подключение к устройству
+## Лицензия
 
-Для подключения используется метод **connect_to**. Метод асинхронный, поэтому о статусе подключения можно узнать от соответствующего сигнала. Метод принимает следующие аргументы:
+MIT License
 
- 1. Информацию об устройстве. Тип **BrainBitInfo**
- 2. Нужно ли устройство переподключать при отключении. Тип **bool**
+## Авторы
 
-Если вторым аргументом передано true:
- 1. при незапланированном отключении девайса он подключится обратно
- 2. если во время отключения было запущено сопротивление - его нужно будет включать отдельно
- 3. если во время отключения был запущен сигнал - он включится самостоятельно, никаких действий предпринимать не нужно
-
-Состояние уже подключенного девайса можно так же получить с помощью сигнала **connectionStateChanged**.
-
-1. подключиться к сигналу:
-    ```python
-    def on_device_connected(address: str, state: ConnectionState):
-        if address==selected_BB.Address and state==ConnectionState.Connected:
-            pass
-
-    brain_bit_controller.connectionStateChanged.connect(on_device_connected)
-    ``` 
-
-2. подключиться к девайсу:
-
-    ```python
-    selected_BB = # получить BrainBitInfo из списка найденных устройств как показано выше
-    brain_bit_controller.connect_to(info=selected_BB, need_reconnect=True)
-    ```
-
-#### Проверка качества наложения
-
-Для проверки качества наложения используются значения сопротивления. Чтобы получить эти значения нужно:
- 1. подключиться к сигналу. Данные начнут приходить только после запуска сопротивлений.
-
-    ```python
-    def on_resist_received(addr: str, resist_states: ResistValues):
-        if address==selected_BB.Address:
-            pass
-
-    brain_bit_controller.resistValuesUpdated.connect(on_resist_received)
-    ```
-
- 2. запустить проверку сопротивлений
-
-    ```python
-    selected_BB_address = # сохраненный адрес нужного девайса
-    brain_bit_controller.start_resist(selected_BB_address)
-    ```
-
- 3. как только достигнуто желаемое качество остановить сьем данных и отключиться от сигнала
-
-    ```python
-    selected_BB_address = # сохраненный адрес нужного девайса
-    brain_bit_controller.resistValuesUpdated.disconnect()
-    brain_bit_controller.stop_resist(selected_BB_address)
-    ```
-
-Структура **ResistValues** содержит 4 поля для каждого канала - O1, O2, T3, T4. Состояние сопротивления представлено перечислением. Сопротивление может быть плохим или нормальным:
- 
- 1. Bad
- 2. Normal
-
-#### Получение эмоциональных соостояний
-
-Эмоциональные состояния представлены несколькими параметрами:
-1. расслаблением и вниманием, получаемыми только после калибровки. Каждый параметр находится в диапазоне 0..100. Параметры представлены в процентах. Только один параметр может быть отличен от 0. Представлены типом [MindDataReal](https://gitlab.com/neurosdk2/cybergarden2025/-/blob/main/students/PythonDemo%20(PyQt)/brain_bit_controller.py?ref_type=heads#L41).
-
-Структура **MindDataReal** состоит из следующих полей:
- 1. attention. Внимание. Тип **float**
- 2. relaxation. Расслабление. Тип **float**
-
-2. абсолютными значениями расслабления и внимания, получаемыми независимо от калибровки. Каждый параметр находится в диапазоне 0..100. Параметры представлены в процентах. Параметры в сумме дают 100%. Представлены типом [MindDataInst](https://gitlab.com/neurosdk2/cybergarden2025/-/blob/main/students/PythonDemo%20(PyQt)/brain_bit_controller.py?ref_type=heads#L35).
-
-Структура **MindDataInst** состоит из следующих полей:
- 1. attention. Внимание. Тип **float**
- 2. relaxation. Расслабление. Тип **float**
-
-3. спектральными значениями альфа, бета и тета. Так же представлены в процентах, в сумме дают 100%. Не зависят от проведения калибровки и наличия артефактов. Представлены типом [SpectralData](https://gitlab.com/neurosdk2/cybergarden2025/-/blob/main/students/PythonDemo%20(PyQt)/brain_bit_controller.py?ref_type=heads#L20).
-
-Структура **SpectralData** состоит из следующих полей:
- 1. alpha. Альфа. Тип **int**
- 1. beta. Бета. Тип **int**
- 1. theta. Тета. Тип **int**
-
-Так же нужно учитывать следующее:
-1. для получения относительных данных расслабления и внимания нужно **откалиброваться**. Калибровка начинается одновременно с началом вычислений. О ее прогрессе можно узнать с помощью соответствующего оповещения. Оповещение содержит мак-адрес калибрующегося девайса, а так же процент прогресса калибровки.
-2. отслеживать **качество сигнала**. Качество сигнала можно получить с помощью сигнала **isArtefacted**. Если в сигнале присутствуют артефакты калибровка не будет проходить, а данные эмоциональных состояний не будут меняться.
-
-Чтобы получить эмоциональные состояния нужно:
-
-1. подписаться на сигналы
-
-    ```python
-    selected_BB_address = # сохраненный адрес нужного девайса
-    def is_artefacted(address: str, artefacted: bool):
-        if address == selected_BB_address:
-            pass
-
-    def calibration_progress_changed(address: str, progress: int):
-        if address == selected_BB_address:
-            pass
-
-    def mind_data_changed(address: str, mind_data: MindDataReal):
-        if address == selected_BB_address:
-            pass
-    
-    def inst_mind_data_changed(address: str, mind_data: MindDataInst):
-        if address == selected_BB_address:
-            pass
-
-    def spectral_data_changed(address: str, spectral_data: SpectralData):
-        if address == selected_BB_address:
-            pass
-
-
-    brain_bit_controller.isArtefacted.connect(is_artefacted)
-    brain_bit_controller.calibrationProcessChanged.connect(calibration_progress_changed)
-    brain_bit_controller.mindDataUpdated.connect(mind_data_changed)
-    brain_bit_controller.mindDataWithoutCalibrationUpdated.connect(inst_mind_data_changed)
-    brain_bit_controller.spectralDataUpdated.connect(spectral_data_changed)
-    ```
-
-2. запустить вычисления
-
-    ```python
-    # здесь происходит подпись на сигналы
-
-    selected_BB_address = # сохраненный адрес нужного девайса
-    brain_bit_controller.start_calculations(selected_BB_address) # начало вычислений
-    ```
-3. по завершению работы отписаться от ивентов и остановить вычисления
-
-    ```python
-    # отключаем сигналы
-    brain_bit_controller.isArtefacted.disconnect()
-    brain_bit_controller.calibrationProcessChanged.disconnect()
-    brain_bit_controller.mindDataUpdated.disconnect()
-    brain_bit_controller.mindDataWithoutCalibrationUpdated.disconnect()
-    brain_bit_controller.spectralDataUpdated.disconnect()
-
-    brain_bit_controller.stop_calculations(selected_BB_address)
-    ```
+Разработано с использованием BrainBit SDK от NeuroTech.
