@@ -2,17 +2,16 @@ import Header from '../components/Header';
 import NavComponents from '../components/NavComponents';
 import BestMomentsComponent from '../components/BestMomentsComponent';
 import OtchetComponent from '../components/OtchetComponent';
+import HumanGraphs from '../components/HumanGraphs';
 
-import example from '../images/ExamplePic.png';
-
-const AnalyseVideo = () => {
+const AnalyseHuman = () => {
     return (
         <div className="analyse-container">
             <Header />
             <NavComponents />
             <div className="analyse-content">
                 <div className="analyse-left">
-                    <img className="graphics-pic" src={example} />
+                    <HumanGraphs />
                     <BestMomentsComponent />
                 </div>
                 <div className="analyse-right">
@@ -23,4 +22,4 @@ const AnalyseVideo = () => {
     );
 };
 
-export default AnalyseVideo;
+export default AnalyseHuman;

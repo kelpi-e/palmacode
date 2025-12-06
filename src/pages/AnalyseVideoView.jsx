@@ -2,8 +2,7 @@ import Header from '../components/Header';
 import NavComponents from '../components/NavComponents';
 import BestMomentsComponent from '../components/BestMomentsComponent';
 import OtchetComponent from '../components/OtchetComponent';
-
-import example from '../images/ExamplePic.png';
+import VideoGraph from '../components/VideoGraph';
 
 const AnalyseVideo = () => {
     return (
@@ -12,7 +11,7 @@ const AnalyseVideo = () => {
             <NavComponents />
             <div className="analyse-content">
                 <div className="analyse-left">
-                    <img className="graphics-pic" src={example} />
+                    <VideoGraph />
                     <BestMomentsComponent />
                 </div>
                 <div className="analyse-right">

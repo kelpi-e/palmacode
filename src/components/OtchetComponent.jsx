@@ -1,4 +1,4 @@
-import Download from '../images/Download.png';
+import Play from '../images/Play.png'
 
 const OtchetComponent = () => {
     const otchetCount = 6;
@@ -13,7 +13,7 @@ const OtchetComponent = () => {
                             <div className="otchet-name">Отчет {index + 1}</div>
                             <div className="otchet-actions">
                                 <button className="download-btn">
-                                    <img src={Download} alt="Скачать" />
+                                    <img src={Play} alt="Скачать" />
                                 </button>
                             </div>
                         </div>
