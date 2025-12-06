@@ -8,8 +8,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QPushButton, QLabel, QListWidget, QProgressBar,
     QLineEdit, QGroupBox, QFileDialog, QFrame, QSlider, QSplitter,
-    QDialog, QScrollArea, QTableWidget, QTableWidgetItem, QHeaderView,
-    QMessageBox
+    QDialog, QScrollArea, QMessageBox
 )
 from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal, QThread
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QBrush
@@ -17,7 +16,6 @@ from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 
 import pyqtgraph as pg
-import numpy as np
 
 from brain_bit_controller import (
     brain_bit_controller, BrainBitInfo, ConnectionState, ResistValues,
@@ -225,6 +223,7 @@ class ResultsTab(QWidget):
     def __init__(self):
         super().__init__()
         self.data = None
+        self.json_data = None
         self.video_path = None
         self.is_playing = False
         self.times = []
@@ -269,7 +268,7 @@ class ResultsTab(QWidget):
         # Main content splitter (vertical)
         main_splitter = QSplitter(Qt.Orientation.Vertical)
         
-        # Top: Video + Current values
+        # Top: Video + Gaze heatmap
         top_widget = QWidget()
         top_layout = QHBoxLayout(top_widget)
         top_layout.setContentsMargins(0, 0, 0, 0)
@@ -281,7 +280,7 @@ class ResultsTab(QWidget):
         video_layout.setContentsMargins(4, 4, 4, 4)
         
         self.video_widget = QVideoWidget()
-        self.video_widget.setMinimumSize(400, 225)
+        self.video_widget.setMinimumSize(500, 280)
         video_layout.addWidget(self.video_widget)
         
         controls_layout = QHBoxLayout()
@@ -301,21 +300,29 @@ class ResultsTab(QWidget):
         
         top_layout.addWidget(video_container, stretch=2)
         
-        # Current values panel
-        values_container = QFrame()
-        values_container.setStyleSheet("QFrame { background-color: #161b22; border: 2px solid #30363d; border-radius: 12px; }")
-        values_layout = QVBoxLayout(values_container)
-        values_layout.setContentsMargins(12, 12, 12, 12)
+        # Gaze heatmap
+        heatmap_container = QFrame()
+        heatmap_container.setStyleSheet("QFrame { background-color: #161b22; border: 2px solid #30363d; border-radius: 12px; }")
+        heatmap_layout = QVBoxLayout(heatmap_container)
+        heatmap_layout.setContentsMargins(8, 8, 8, 8)
         
-        values_header = QLabel("Текущие показатели")
-        values_header.setStyleSheet("font-size: 16px; font-weight: 600; color: #58a6ff;")
-        values_layout.addWidget(values_header)
+        heatmap_header = QLabel("Карта взгляда")
+        heatmap_header.setStyleSheet("font-size: 14px; font-weight: 600; color: #58a6ff;")
+        heatmap_layout.addWidget(heatmap_header)
         
-        self.current_time_label = QLabel("Время: --:--")
-        self.current_time_label.setStyleSheet("color: #e6edf3; font-size: 14px;")
-        values_layout.addWidget(self.current_time_label)
+        self.gaze_heatmap = GazeHeatmapWidget()
+        self.gaze_heatmap.setMinimumSize(250, 200)
+        heatmap_layout.addWidget(self.gaze_heatmap)
         
-        # Metric cards for current values
+        top_layout.addWidget(heatmap_container, stretch=1)
+        
+        main_splitter.addWidget(top_widget)
+        
+        # Middle: Real-time metric cards
+        cards_widget = QWidget()
+        cards_layout = QHBoxLayout(cards_widget)
+        cards_layout.setContentsMargins(0, 8, 0, 8)
+        
         self.cur_attention = MetricCard("Внимание", "--", "#58a6ff")
         self.cur_alpha = MetricCard("Альфа", "--", "#3fb950")
         self.cur_beta = MetricCard("Бета", "--", "#f0883e")
@@ -323,22 +330,16 @@ class ResultsTab(QWidget):
         self.cur_gaze_x = MetricCard("Взгляд X", "--", "#a371f7")
         self.cur_gaze_y = MetricCard("Взгляд Y", "--", "#f778ba")
         
-        values_layout.addWidget(self.cur_attention)
-        values_layout.addWidget(self.cur_alpha)
-        values_layout.addWidget(self.cur_beta)
-        values_layout.addWidget(self.cur_theta)
-        values_layout.addWidget(self.cur_gaze_x)
-        values_layout.addWidget(self.cur_gaze_y)
-        values_layout.addStretch()
+        cards_layout.addWidget(self.cur_attention)
+        cards_layout.addWidget(self.cur_alpha)
+        cards_layout.addWidget(self.cur_beta)
+        cards_layout.addWidget(self.cur_theta)
+        cards_layout.addWidget(self.cur_gaze_x)
+        cards_layout.addWidget(self.cur_gaze_y)
         
-        top_layout.addWidget(values_container, stretch=1)
-        
-        main_splitter.addWidget(top_widget)
+        main_splitter.addWidget(cards_widget)
         
         # Bottom: Graphs
-        bottom_splitter = QSplitter(Qt.Orientation.Horizontal)
-        
-        # Left: Graphs
         graphs_widget = QWidget()
         graphs_layout = QVBoxLayout(graphs_widget)
         graphs_layout.setContentsMargins(0, 0, 0, 0)
@@ -350,7 +351,7 @@ class ResultsTab(QWidget):
         mental_layout = QVBoxLayout(mental_group)
         self.mental_plot = pg.PlotWidget()
         self.mental_plot.setBackground('#161b22')
-        self.mental_plot.setMinimumHeight(120)
+        self.mental_plot.setMinimumHeight(100)
         self.mental_plot.showGrid(x=True, y=True, alpha=0.3)
         self.mental_plot.setLabel('left', 'Значение', units='%')
         self.mental_plot.setLabel('bottom', 'Время', units='с')
@@ -365,7 +366,7 @@ class ResultsTab(QWidget):
         spectral_layout = QVBoxLayout(spectral_group)
         self.spectral_plot = pg.PlotWidget()
         self.spectral_plot.setBackground('#161b22')
-        self.spectral_plot.setMinimumHeight(120)
+        self.spectral_plot.setMinimumHeight(100)
         self.spectral_plot.showGrid(x=True, y=True, alpha=0.3)
         self.spectral_plot.setLabel('left', 'Значение', units='%')
         self.spectral_plot.setLabel('bottom', 'Время', units='с')
@@ -379,7 +380,7 @@ class ResultsTab(QWidget):
         gaze_layout = QVBoxLayout(gaze_group)
         self.gaze_plot = pg.PlotWidget()
         self.gaze_plot.setBackground('#161b22')
-        self.gaze_plot.setMinimumHeight(120)
+        self.gaze_plot.setMinimumHeight(100)
         self.gaze_plot.showGrid(x=True, y=True, alpha=0.3)
         self.gaze_plot.setLabel('left', 'Позиция (0-1)')
         self.gaze_plot.setLabel('bottom', 'Время', units='с')
@@ -389,58 +390,8 @@ class ResultsTab(QWidget):
         gaze_layout.addWidget(self.gaze_plot)
         graphs_layout.addWidget(gaze_group)
         
-        bottom_splitter.addWidget(graphs_widget)
-        
-        # Right: Gaze heatmap + Stats
-        right_widget = QWidget()
-        right_layout = QVBoxLayout(right_widget)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Gaze heatmap
-        heatmap_group = QGroupBox("Карта взгляда")
-        heatmap_layout = QVBoxLayout(heatmap_group)
-        self.gaze_heatmap = GazeHeatmapWidget()
-        self.gaze_heatmap.setMinimumSize(300, 200)
-        heatmap_layout.addWidget(self.gaze_heatmap)
-        right_layout.addWidget(heatmap_group)
-        
-        # Statistics
-        stats_group = QGroupBox("Статистика")
-        stats_layout = QVBoxLayout(stats_group)
-        
-        self.stats_table = QTableWidget()
-        self.stats_table.setColumnCount(2)
-        self.stats_table.setHorizontalHeaderLabels(["Параметр", "Значение"])
-        self.stats_table.horizontalHeader().setStretchLastSection(True)
-        self.stats_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.stats_table.setStyleSheet("""
-            QTableWidget {
-                background-color: #0d1117;
-                border: 1px solid #30363d;
-                border-radius: 6px;
-                gridline-color: #21262d;
-            }
-            QTableWidget::item {
-                padding: 8px;
-                color: #e6edf3;
-            }
-            QHeaderView::section {
-                background-color: #161b22;
-                color: #8b949e;
-                padding: 8px;
-                border: none;
-                border-bottom: 1px solid #30363d;
-                font-weight: 600;
-            }
-        """)
-        stats_layout.addWidget(self.stats_table)
-        right_layout.addWidget(stats_group)
-        
-        bottom_splitter.addWidget(right_widget)
-        bottom_splitter.setSizes([600, 400])
-        
-        main_splitter.addWidget(bottom_splitter)
-        main_splitter.setSizes([300, 500])
+        main_splitter.addWidget(graphs_widget)
+        main_splitter.setSizes([300, 80, 400])
         
         layout.addWidget(main_splitter)
         
@@ -473,16 +424,28 @@ class ResultsTab(QWidget):
         
         try:
             with open(filename, 'r', encoding='utf-8') as f:
-                json_data = json.load(f)
+                self.json_data = json.load(f)
             
-            self.data = json_data.get('records', [])
+            self.data = self.json_data.get('records', [])
+            video_file = self.json_data.get('video_file', '')
             
-            self.file_label.setText(f"Загружено: {os.path.basename(filename)} ({len(self.data)} записей)")
+            info_text = f"Загружено: {os.path.basename(filename)} ({len(self.data)} записей)"
+            if video_file:
+                info_text += f" | Видео: {video_file}"
+            
+            self.file_label.setText(info_text)
             self.file_label.setStyleSheet("color: #3fb950; font-size: 14px;")
             
             self.update_graphs()
-            self.update_stats()
             self.load_video_btn.setEnabled(True)
+            
+            # Попробуем автоматически загрузить видео если путь есть
+            video_path = self.json_data.get('video_path')
+            if video_path and os.path.exists(video_path):
+                self.video_path = video_path
+                self.media_player.setSource(QUrl.fromLocalFile(video_path))
+                self.play_btn.setEnabled(True)
+                self.video_slider.setEnabled(True)
             
         except Exception as e:
             self.file_label.setText(f"Ошибка: {str(e)}")
@@ -553,16 +516,17 @@ class ResultsTab(QWidget):
             record = self.data[closest_idx]
             elapsed = record.get('elapsed_sec', 0)
             
-            # Update current time
-            self.current_time_label.setText(f"Время: {elapsed:.1f} сек")
-            
             # Update metric cards
-            self.cur_attention.set_value(f"{record.get('attention', 0):.0f}%")
+            attention_val = record.get('attention', 0)
+            self.cur_attention.set_value(f"{attention_val:.0f}%" if attention_val else "--")
             self.cur_alpha.set_value(f"{record.get('alpha', 0)}%")
             self.cur_beta.set_value(f"{record.get('beta', 0)}%")
             self.cur_theta.set_value(f"{record.get('theta', 0)}%")
-            self.cur_gaze_x.set_value(f"{record.get('gaze_x', 0):.2f}")
-            self.cur_gaze_y.set_value(f"{record.get('gaze_y', 0):.2f}")
+            
+            gaze_x = record.get('gaze_x', 0)
+            gaze_y = record.get('gaze_y', 0)
+            self.cur_gaze_x.set_value(f"{gaze_x:.2f}" if gaze_x else "--")
+            self.cur_gaze_y.set_value(f"{gaze_y:.2f}" if gaze_y else "--")
             
             # Update vertical lines on graphs
             self.mental_vline.setPos(elapsed)
@@ -620,48 +584,6 @@ class ResultsTab(QWidget):
         # Gaze heatmap
         gaze_points = [(self.gaze_x[i], self.gaze_y[i], self.times[i]) for i in range(len(self.times)) if self.gaze_x[i] > 0 or self.gaze_y[i] > 0]
         self.gaze_heatmap.set_data(gaze_points)
-    
-    def update_stats(self):
-        if not self.data:
-            return
-        
-        # Calculate statistics
-        attention = [float(r.get('attention', 0)) for r in self.data if r.get('attention')]
-        alpha = [float(r.get('alpha', 0)) for r in self.data if r.get('alpha')]
-        beta = [float(r.get('beta', 0)) for r in self.data if r.get('beta')]
-        theta = [float(r.get('theta', 0)) for r in self.data if r.get('theta')]
-        
-        stats = [
-            ("Длительность записи", f"{float(self.data[-1].get('elapsed_sec', 0)):.1f} сек"),
-            ("Всего записей", str(len(self.data))),
-            ("", ""),
-            ("Внимание (среднее)", f"{np.mean(attention):.1f}%" if attention else "—"),
-            ("Внимание (макс)", f"{np.max(attention):.1f}%" if attention else "—"),
-            ("", ""),
-            ("Альфа (среднее)", f"{np.mean(alpha):.1f}%" if alpha else "—"),
-            ("Бета (среднее)", f"{np.mean(beta):.1f}%" if beta else "—"),
-            ("Тета (среднее)", f"{np.mean(theta):.1f}%" if theta else "—"),
-        ]
-        
-        # Count gaze directions
-        gaze_h = [r.get('gaze_h', '') for r in self.data]
-        left_count = gaze_h.count('left')
-        right_count = gaze_h.count('right')
-        center_count = gaze_h.count('center')
-        total_gaze = left_count + right_count + center_count
-        
-        if total_gaze > 0:
-            stats.extend([
-                ("", ""),
-                ("Взгляд влево", f"{left_count} ({100*left_count/total_gaze:.1f}%)"),
-                ("Взгляд вправо", f"{right_count} ({100*right_count/total_gaze:.1f}%)"),
-                ("Взгляд в центр", f"{center_count} ({100*center_count/total_gaze:.1f}%)"),
-            ])
-        
-        self.stats_table.setRowCount(len(stats))
-        for i, (param, value) in enumerate(stats):
-            self.stats_table.setItem(i, 0, QTableWidgetItem(param))
-            self.stats_table.setItem(i, 1, QTableWidgetItem(value))
 
 
 class ConnectionTab(QWidget):
@@ -1075,6 +997,7 @@ class VideoRecordingTab(QWidget):
         self.current_brain_data = {}
         self.current_gaze_data = None
         self.video_loaded = False
+        self.video_file_path = None  # Путь к видеофайлу для сохранения в JSON
         self.camera_active = False
         self.fullscreen_dialog = None
         self.reports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
@@ -1294,6 +1217,7 @@ class VideoRecordingTab(QWidget):
     def select_video(self):
         filename, _ = QFileDialog.getOpenFileName(self, "Выбрать видео", "", "Видео (*.mp4 *.avi *.mkv *.mov)")
         if filename:
+            self.video_file_path = filename  # Сохраняем путь для JSON
             self.video_path_label.setText(os.path.basename(filename))
             self.video_path_label.setStyleSheet("color: #3fb950; font-size: 12px;")
             self.media_player.setSource(QUrl.fromLocalFile(filename))
@@ -1605,6 +1529,8 @@ class VideoRecordingTab(QWidget):
             report = {
                 'created_at': self.recording_start_time.isoformat(),
                 'ended_at': datetime.now().isoformat(),
+                'video_file': os.path.basename(self.video_file_path) if self.video_file_path else None,
+                'video_path': self.video_file_path,
                 'total_records': len(self.record_data),
                 'records': self.record_data
             }
