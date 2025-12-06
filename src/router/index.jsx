@@ -4,6 +4,7 @@ import AuthorizationView from '../pages/AuthorizationView';
 import VerifyView from '../pages/VerifyView';
 import DoneView from '../pages/DoneView';
 import AnalyseVideoView from '../pages/AnalyseVideoView';
+import AnalyseHumanView from '../pages/AnalyseHumanView';
 
 const Router = () => {
   return (
@@ -14,6 +15,7 @@ const Router = () => {
         <Route path="/verify" element={<VerifyView />} />
         <Route path="/done" element={<DoneView />} />
         <Route path="/analyse-video" element={<AnalyseVideoView />} />
+        <Route path="/analyse-human" element={<AnalyseHumanView />} />
       </Routes>
     </BrowserRouter>
   );

@@ -14,10 +14,10 @@ const Header = () => {
         <header className="main-header">
             <img className='logo-main' src={logo} alt="BrainTube Logo" />
             <button 
-            className="profile-button"
-            onClick={handleProfileClick}
-            aria-label="Профиль">
-            <img src={Profile} alt="Профиль пользователя" />
+                className="profile-button"
+                onClick={handleProfileClick}
+                aria-label="Профиль">
+                <img src={Profile} alt="Профиль пользователя" />
             </button>
         </header>
     );
