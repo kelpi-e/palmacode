@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import logo from '../images/logo.png';
 import Profile from '../images/Profile.png';
 
@@ -7,6 +7,7 @@ const Header = () => {
     const navigate = useNavigate();
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState(null);
+    const fileInputRef = useRef(null);
 
     useEffect(() => {
         const checkAuth = () => {
@@ -24,6 +25,27 @@ const Header = () => {
         
         checkAuth();
     }, []);
+
+    const handleVideoUpload = (event) => {
+        const file = event.target.files[0];
+        if (file) 
+        {
+            const videoUrl = URL.createObjectURL(file);
+            
+            navigate('/analyse-video', { 
+                state: { 
+                    videoFile: file,
+                    videoUrl: videoUrl
+                } 
+            });
+        }
+    };
+
+    const handleUploadClick = () => {
+        if (fileInputRef.current) {
+            fileInputRef.current.click();
+        }
+    };
 
     const handleProfileClick = async () => {
         setIsLoading(true);
@@ -133,6 +155,23 @@ const Header = () => {
                         <button onClick={() => setError(null)}>×</button>
                     </div>
                 )}
+                
+                <button 
+                    className="upload-video-btn"
+                    onClick={handleUploadClick}
+                    aria-label="Загрузить видео"
+                    title="Загрузить видео для анализа">
+                    Загрузить видео
+                </button>
+                
+                <input
+                    type="file"
+                    accept="video/*"
+                    onChange={handleVideoUpload}
+                    ref={fileInputRef}
+                    style={{ display: 'none' }}
+                />
+                
                 <button 
                     className="profile-button"
                     onClick={handleProfileClick}
