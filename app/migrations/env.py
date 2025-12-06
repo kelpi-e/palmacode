@@ -8,6 +8,7 @@ from alembic import context
 from database.database import DATABASE_URL, Base
 from users.models import User
 from videos.models import Video
+from adminuser.models import UserToAdmin, Invitation
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

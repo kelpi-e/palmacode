@@ -1,5 +1,7 @@
+import os
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import FileResponse
 from services.usersDepends import get_current_user
 from users.models import User
 from videos.schemas import (
@@ -22,13 +24,13 @@ router = APIRouter(
     response_model=List[SVideo],
     status_code=status.HTTP_200_OK,
     summary="Получить все видео пользователя",
-    description="Возвращает список всех видео, загруженных текущим пользователем"
+    description="Возвращает список всех видео пользователя и его админов"
 )
 async def get_all_videos(
     current_user: User = Depends(get_current_user)
 ) -> List[SVideo]:
-    """Получить все видео текущего пользователя"""
-    videos = await VideoController.get_videos_by_user(current_user.id)
+    """Получить все видео текущего пользователя и его админов"""
+    videos = await VideoController.get_accessible_videos(current_user.id)
     return [
         SVideo(
             id=video.id,
@@ -52,18 +54,11 @@ async def get_video(
     current_user: User = Depends(get_current_user)
 ) -> SVideo:
     """Получить видео по ID"""
-    video = await VideoController.get_video_by_id(video_id)
+    video = await VideoController.get_accessible_video(video_id, current_user.id)
     if not video:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Видео не найдено"
-        )
-    
-    # можно видеть только свои видео
-    if video.uploaded_by != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Нет доступа к этому видео"
+            detail="Видео не найдено или нет доступа"
         )
     
     return SVideo(
@@ -86,15 +81,8 @@ async def create_video(
     current_user: User = Depends(get_current_user)
 ) -> SVideoCreateResponse:
     """Создать новое видео"""
-    existing_video = await VideoController.find_video_by_url(video.url)
-    if existing_video:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Видео с таким URL уже существует"
-        )
-    
     try:
-        new_video = await VideoController.create_video(
+        new_video = await VideoController.create_video_with_validation(
             name=video.name,
             url=video.url,
             uploaded_by=current_user.id
@@ -126,22 +114,10 @@ async def update_video(
     current_user: User = Depends(get_current_user)
 ) -> SVideo:
     """Обновить видео"""
-    video = await VideoController.get_video_by_id(video_id)
-    if not video:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Видео не найдено"
-        )
-    
-    if video.uploaded_by != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Нет прав для обновления этого видео"
-        )
-    
     try:
-        updated_video = await VideoController.update_video(
+        updated_video = await VideoController.update_video_with_permission(
             video_id=video_id,
+            user_id=current_user.id,
             name=video_data.name,
             url=video_data.url
         )
@@ -160,7 +136,7 @@ async def update_video(
         )
     except ValueError as e:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_403_FORBIDDEN if "прав" in str(e) else status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
 
@@ -176,24 +152,56 @@ async def delete_video(
     current_user: User = Depends(get_current_user)
 ):
     """Удалить видео"""
-    video = await VideoController.get_video_by_id(video_id)
-    if not video:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Видео не найдено"
+    try:
+        deleted = await VideoController.delete_video_with_permission(
+            video_id=video_id,
+            user_id=current_user.id
         )
-    
-    if video.uploaded_by != current_user.id:
+        
+        if not deleted:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Видео не найдено"
+            )
+    except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Нет прав для удаления этого видео"
-        )
-    
-    deleted = await VideoController.delete_video(video_id)
-    if not deleted:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Видео не найдено"
+            detail=str(e)
         )
     
     return None
+
+
+@router.get(
+    "/file/{video_id}",
+    response_class=FileResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Скачать файл видео",
+    description="Отдает файл видео по пути из базы данных"
+)
+async def download_video_file(
+    video_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """Скачать файл видео"""
+    try:
+        file_path = await VideoController.get_video_file_path(video_id, current_user.id)
+        
+        if not file_path:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Видео не найдено или нет доступа"
+            )
+        
+        video = await VideoController.get_video_by_id(video_id)
+        
+        return FileResponse(
+            path=file_path,
+            filename=video.name or os.path.basename(file_path),
+            media_type='application/octet-stream'
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
