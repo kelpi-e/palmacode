@@ -1,5 +1,6 @@
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { useState, useEffect } from 'react';
+import apiClient from '../api/client.js';
 import Header from '../components/Header';
 import NavComponents from '../components/NavComponents';
 import BestMomentsComponent from '../components/BestMomentsComponent';
@@ -7,20 +8,18 @@ import OtchetComponent from '../components/OtchetComponent';
 import VideoGraph from '../components/VideoGraph';
 
 const AnalyseVideo = () => {
-    const location = useLocation();
+    const { videoId } = useParams();
     const navigate = useNavigate();
     const [initialVideo, setInitialVideo] = useState(null);
     const [videoData, setVideoData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
 
-    const API_BASE_URL = 'http://192.168.31.111:8099'; 
-
     useEffect(() => {
         const fetchVideoData = async () => {
-            if (!location.state) 
+            if (!videoId) 
             {
-                setError('Нет данных о видео');
+                setError('ID видео не указан');
                 setLoading(false);
                 return;
             }
@@ -30,80 +29,48 @@ const AnalyseVideo = () => {
 
             try 
             {
-                const { videoFile, videoUrl, videoId, serverResponse } = location.state;
+                // Always fetch video data from server using videoId
+                const data = await apiClient.getVideoById(videoId);
+                setVideoData(data);
                 
-                setInitialVideo({
-                    file: videoFile,
-                    url: videoUrl
-                });
-
-                if (serverResponse) 
-                {
-                    setVideoData(serverResponse);
-                    setLoading(false);
-                    return;
-                }
-
-                if (videoId) 
-                {
-                    const token = localStorage.getItem('authToken') || 
-                                  localStorage.getItem('token') || 
-                                  sessionStorage.getItem('authToken');
+                // Try to get video file from server
+                try {
+                    const videoBlob = await apiClient.downloadVideoFile(videoId);
+                    const videoUrl = URL.createObjectURL(videoBlob);
                     
-                    const headers = {
-                        'Accept': 'application/json',
-                    };
-                    
-                    if (token)
-                        headers['Authorization'] = `Bearer ${token}`;
-
-                    const response = await fetch(`${API_BASE_URL}/video/${videoId}`, {
-                        method: 'GET',
-                        headers: headers,
+                    setInitialVideo({
+                        file: null, // We don't have the original file
+                        url: videoUrl,
+                        serverUrl: data.url // Store server URL as well
                     });
-
-                    if (!response.ok)
-                        throw new Error(`Ошибка получения данных видео: ${response.status}`);
-
-                    const data = await response.json();
-                    setVideoData(data);
-                } 
-                else 
-                {
-                    if (videoFile) 
-                      {
-                        const formData = new FormData();
-                        formData.append('video', videoFile);
-                        
-                        const token = localStorage.getItem('authToken') || 
-                                      localStorage.getItem('token') || 
-                                      sessionStorage.getItem('authToken');
-                        
-                        const headers = {
-                            'Accept': 'application/json',
-                        };
-                        
-                        if (token)
-                            headers['Authorization'] = `Bearer ${token}`;
-
-                        const uploadResponse = await fetch(`${API_BASE_URL}/video`, {
-                            method: 'POST',
-                            headers: headers,
-                            body: formData,
+                } catch (downloadErr) {
+                    console.warn('Не удалось загрузить файл видео, используем URL:', downloadErr);
+                    // If download fails, try to use URL from server data
+                    if (data.url) {
+                        setInitialVideo({
+                            file: null,
+                            url: data.url,
+                            serverUrl: data.url
                         });
-
-                        if (!uploadResponse.ok)
-                            throw new Error(`Ошибка загрузки видео: ${uploadResponse.status}`);
-
-                        const uploadData = await uploadResponse.json();
-                        setVideoData(uploadData);
+                    } else {
+                        throw new Error('Не удалось получить видео файл');
                     }
                 }
             } 
             catch (err) 
             {
                 console.error('Ошибка при получении данных видео:', err);
-                setError(err.message || 'Произошла ошибка при загрузке данных видео');
+                
+                if (err.type === 'network') {
+                    setError(err.message);
+                } else if (err.type === 'unauthorized' || err.status === 401) {
+                    setError('Требуется авторизация. Перенаправляем на страницу входа...');
+                    setTimeout(() => {
+                        navigate('/authorization');
+                    }, 2000);
+                } else {
+                    setError(err.message || 'Произошла ошибка при загрузке данных видео');
+                }
             } 
             finally 
             {
@@ -112,7 +79,7 @@ const AnalyseVideo = () => {
         };
 
         fetchVideoData();
-    }, [location.state]);
+    }, [videoId, navigate]);
 
     if (loading) {
         return (
@@ -150,7 +117,6 @@ const AnalyseVideo = () => {
                     <VideoGraph 
                         initialVideo={initialVideo} 
                         videoData={videoData} />
-                    <BestMomentsComponent videoData={videoData} />
                 </div>
                 <div className="analyse-right">
                     <OtchetComponent videoData={videoData} />

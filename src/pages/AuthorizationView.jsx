@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../api/useAuth.js';
+import apiClient from '../api/client.js';
 
 import logo from '../images/logo.png';
 
@@ -15,8 +16,6 @@ const AuthorizationView = () => {
 
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  
-  const API_BASE_URL = 'http://192.168.31.111:8099';
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -25,72 +24,29 @@ const AuthorizationView = () => {
     
     try 
     {
+      // Client-side validation
       if (!form.email || !form.password)
         throw new Error('Все поля обязательны для заполнения');
       
       if (!form.email.includes('@'))
         throw new Error('Введите корректный email адрес');
 
-      const loginData = {
-        email: form.email,
-        password: form.password
-      };
+      console.log('Отправка запроса на авторизацию:', { email: form.email });
 
-      console.log('Отправка запроса на авторизацию:', loginData);
+      // Call API - token will be automatically saved by apiClient
+      const data = await apiClient.login(form.email, form.password);
 
-      const response = await fetch(`${API_BASE_URL}/auth/login`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-        },
-        body: JSON.stringify(loginData)
-      });
+      console.log('Авторизация успешна');
 
-      const responseText = await response.text();
-      console.log('Ответ сервера при авторизации:', responseText);
-
-      let data;
-      try 
-      {
-        data = JSON.parse(responseText);
-      } 
-      catch (parseError) 
-      {
-        throw new Error(`Некорректный ответ сервера: ${responseText.substring(0, 100)}`);
+      // Update auth hook
+      if (data.access_token && auth && auth.setToken) {
+        auth.setToken(data.access_token);
       }
 
-      if (!response.ok)
-        throw new Error(data.message || data.error || data.detail || `Ошибка авторизации: ${response.status}`);
+      // Clear any previous errors
+      setError('');
 
-      if (data.token || data.access_token || data.accessToken) 
-      {
-        const token = data.token || data.access_token || data.accessToken;
-        
-        localStorage.setItem('authToken', token);
-        
-        if (auth && auth.setToken) 
-        {
-          auth.setToken(token);
-          console.log('Токен сохранен в useAuth:', token.substring(0, 20) + '...');
-        }
-        
-        console.log('Токен успешно сохранен в localStorage');
-      } 
-      else 
-      {
-        console.warn('Токен не найден в ответе сервера, но авторизация прошла успешно');
-        console.log('Полный ответ сервера:', data);
-        
-        if (data.data && data.data.token) 
-        {
-          const token = data.data.token;
-          localStorage.setItem('authToken', token);
-          if (auth && auth.setToken)
-            auth.setToken(token);
-        }
-      }
-
+      // Navigate to main page
       navigate('/done');
 
     } 
@@ -98,14 +54,16 @@ const AuthorizationView = () => {
     {
       console.error('Ошибка авторизации:', err);
       
-      if (err.name === 'TypeError' && err.message.includes('Failed to fetch'))
-        setError('Не удалось подключиться к серверу. Проверьте: 1) Запущен ли бекенд 2) Правильность URL: ' + API_BASE_URL);
-      else if (err.message.includes('HTML страницу'))
-        setError(err.message + '. Возможно, неправильный endpoint API или проблемы с CORS.');
-      else if (err.message.includes('401') || err.message.includes('неверный'))
+      // Handle specific error types
+      if (err.type === 'network') {
+        setError(err.message);
+      } else if (err.status === 401 || err.status === 422) {
         setError('Неверный email или пароль');
-      else
+      } else if (err.type === 'validation') {
+        setError(err.message || 'Ошибка валидации данных');
+      } else {
         setError(err.message || 'Произошла ошибка при авторизации');
+      }
     } 
     finally 
     {
@@ -156,14 +114,22 @@ const AuthorizationView = () => {
           <button 
             type="submit" 
             className="submit-button"
-            disabled={loading}>
+            disabled={loading}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '8px'
+            }}>
             {loading ? (
               <>
                 <span className="spinner"></span>
                 Вход...
               </>
             ) : (
-              'Войти'
+              <>
+                Войти
+              </>
             )}
           </button>
         </form>

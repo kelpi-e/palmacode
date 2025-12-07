@@ -1,6 +1,7 @@
 import { useNavigate } from 'react-router-dom';
 import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../api/useAuth.js';
+import apiClient from '../api/client.js';
 import logo from '../images/logo.png';
 import Profile from '../images/Profile.png';
 
@@ -10,39 +11,42 @@ const Header = () => {
     const [isLoading, setIsLoading] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
     const [error, setError] = useState(null);
+    const [successMessage, setSuccessMessage] = useState(null);
+    const [userRole, setUserRole] = useState(null);
+    const [isCreatingInvitation, setIsCreatingInvitation] = useState(false);
     const fileInputRef = useRef(null);
 
-    const API_BASE_URL = 'http://192.168.31.111:8099';
-
     useEffect(() => {
-        const checkAuth = () => {
+        const checkAuth = async () => {
             try 
             {
-                const token = getToken();
-                if (!token)
+                const token = auth.getToken();
+                if (!token) {
                     console.log('Пользователь не авторизован. Токен не найден.');
-                else
-                    console.log('Токен найден:', token.substring(0, 20) + '...');
+                    setUserRole(null);
+                    return;
+                }
+                
+                console.log('Токен найден:', token.substring(0, 20) + '...');
+                
+                // Get user role
+                try {
+                    const user = await apiClient.getCurrentUser();
+                    setUserRole(user.role);
+                } catch (err) {
+                    console.error('Ошибка при получении данных пользователя:', err);
+                    setUserRole(null);
+                }
             } 
             catch (err) 
             {
                 console.error('Ошибка при проверке авторизации:', err);
+                setUserRole(null);
             }
         };
         
         checkAuth();
-    }, []);
-
-    const getToken = () => {
-        const token = localStorage.getItem('authToken') || 
-                     localStorage.getItem('token') || 
-                     sessionStorage.getItem('authToken');
-        
-        if (!token && auth && auth.token)
-            return auth.token;
-        
-        return token;
-    };
+    }, [auth.token]);
 
     const handleVideoUpload = async (event) => {
         const file = event.target.files[0];
@@ -51,86 +55,41 @@ const Header = () => {
 
         setIsUploading(true);
         setError(null);
+        setSuccessMessage(null);
 
         try 
         {
-            const token = getToken();
-            if (!token)
+            // Check authentication
+            if (!auth.isAuthenticated()) {
                 throw new Error('Требуется авторизация. Пожалуйста, войдите в систему.');
+            }
 
-            console.log('Используемый токен для загрузки видео:', token.substring(0, 20) + '...');
-
+            // Validate file type
             if (!file.type.startsWith('video/'))
                 throw new Error('Пожалуйста, выберите видео файл');
 
+            // Validate file size (500MB max)
             const maxSize = 500 * 1024 * 1024; 
             if (file.size > maxSize)
                 throw new Error('Файл слишком большой. Максимальный размер: 500MB');
 
             console.log('Начинаю загрузку видео:', file.name, 'размер:', file.size);
 
-            const formData = new FormData();
-            formData.append('video', file);
-            
-            const headers = {
-                'Accept': 'application/json',
-            };
-            
-            if (token) 
-            {
-                headers['Authorization'] = `Bearer ${token}`;
-                console.log('Добавлен заголовок Authorization с токеном');
-            }
+            // Use video name or file name
+            const videoName = file.name.replace(/\.[^/.]+$/, ''); // Remove extension
 
-            console.log('Отправка запроса на:', `${API_BASE_URL}/video`);
-            console.log('Заголовки запроса:', headers);
-
-            const response = await fetch(`${API_BASE_URL}/video`, {
-                method: 'POST',
-                headers: headers,
-                body: formData,
-            });
-
-            console.log('Ответ сервера:', response.status, response.statusText);
-
-            const responseText = await response.text();
-            console.log('Тело ответа:', responseText);
-
-            let data;
-            try 
-            {
-                data = JSON.parse(responseText);
-            } 
-            catch (parseError) 
-            {
-                if (responseText.startsWith('<!DOCTYPE') || responseText.startsWith('<html>'))
-                    throw new Error('Сервер вернул HTML страницу. Проверьте правильность URL API');
-                throw new Error(`Некорректный ответ сервера: ${responseText.substring(0, 100)}`);
-            }
-
-            if (response.status === 401) 
-            {
-                console.error('Ошибка 401: Неавторизованный доступ');
-                localStorage.removeItem('authToken');
-                localStorage.removeItem('token');
-                sessionStorage.removeItem('authToken');
-                
-                if (auth && auth.setToken)
-                    auth.setToken(null);
-                
-                throw new Error('Сессия истекла. Пожалуйста, войдите снова.');
-            }
-
-            if (!response.ok)
-                throw new Error(data.message || data.error || data.detail || `Ошибка загрузки: ${response.status}`);
+            // Call API
+            const data = await apiClient.createVideo(file, videoName);
 
             console.log('Видео успешно загружено:', data);
             
+            // Create local URL for preview
             const videoUrl = URL.createObjectURL(file);
             
+            // Prepare video info
             const videoInfo = {
-                id: data.videoId || Date.now(),
-                name: file.name,
+                id: data.id || Date.now(),
+                name: data.name || file.name,
                 size: file.size,
                 type: file.type,
                 uploadDate: new Date().toLocaleDateString('ru-RU'),
@@ -139,41 +98,53 @@ const Header = () => {
                 file: file,
             };
 
+            // Save to localStorage
             const savedVideos = JSON.parse(localStorage.getItem('uploadedVideos') || '[]');
             savedVideos.push(videoInfo);
             localStorage.setItem('uploadedVideos', JSON.stringify(savedVideos));
 
+            // Dispatch event to update DoneView
             window.dispatchEvent(new CustomEvent('videoUploaded', { 
                 detail: videoInfo 
             }));
 
-            navigate('/analyse-video', { 
-                state: { 
-                    videoFile: file,
-                    videoUrl: videoUrl,
-                    videoId: data.videoId || videoInfo.id,
-                    serverResponse: data
-                } 
-            });
+            // Show success message
+            setError(null);
+            setSuccessMessage(`Видео "${videoInfo.name}" успешно загружено!`);
+            
+            // Clear success message after 3 seconds
+            setTimeout(() => {
+                setSuccessMessage(null);
+            }, 3000);
+            
+            // Navigate to video analysis page with videoId
+            if (data.id) {
+                navigate(`/analyse-video/${data.id}`);
+            } else if (window.location.pathname !== '/done') {
+                navigate('/done');
+            }
 
         } 
         catch (err) 
         {
             console.error('Ошибка при загрузке видео:', err);
             
-            if (err.name === 'TypeError' && err.message.includes('Failed to fetch'))
-                setError('Не удалось подключиться к серверу. Проверьте: 1) Запущен ли бекенд 2) Правильность URL: ' + API_BASE_URL);
-            else if (err.message.includes('HTML страницу'))
-                setError(err.message + '. Возможно, неправильный endpoint API или проблемы с CORS.');
-            else if (err.message.includes('Сессия истекла') || err.message.includes('Требуется авторизация')) 
-            {
+            // Handle specific error types
+            if (err.type === 'network') {
+                setError(err.message);
+            } else if (err.type === 'unauthorized' || err.status === 401) {
+                setError('Сессия истекла. Пожалуйста, войдите снова.');
+                setTimeout(() => {
+                    navigate('/authorization');
+                }, 2000);
+            } else if (err.message.includes('Требуется авторизация')) {
                 setError(err.message);
                 setTimeout(() => {
                     navigate('/authorization');
                 }, 2000);
-            } 
-            else
+            } else {
                 setError(err.message || 'Произошла ошибка при загрузке видео');
+            }
         } 
         finally 
         {
@@ -184,8 +155,7 @@ const Header = () => {
     };
 
     const handleUploadClick = () => {
-        const token = getToken();
-        if (!token) 
+        if (!auth.isAuthenticated()) 
         {
             setError('Для загрузки видео требуется авторизация');
             setTimeout(() => {
@@ -204,34 +174,25 @@ const Header = () => {
         
         try 
         {
-            const token = getToken();
-            
-            if (!token) 
+            if (!auth.isAuthenticated()) 
             {
                 navigate('/authorization');
                 return;
             }
 
-            const response = await fetch(`${API_BASE_URL}/auth/validate`, {
-                method: 'GET',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Accept': 'application/json',
-                },
-            });
-
-            if (response.status === 401) 
-            {
-                localStorage.removeItem('authToken');
-                localStorage.removeItem('token');
-                sessionStorage.removeItem('authToken');
-                if (auth && auth.setToken)
-                    auth.setToken(null);
-                navigate('/authorization');
-                return;
+            // Validate token by getting current user
+            try {
+                await apiClient.getCurrentUser();
+            } catch (err) {
+                if (err.type === 'unauthorized' || err.status === 401) {
+                    auth.removeToken();
+                    apiClient.removeToken();
+                    navigate('/authorization');
+                    return;
+                }
+                throw err;
             }
 
-            await new Promise(resolve => setTimeout(resolve, 300));
             navigate('/profile');
             
         } 
@@ -261,20 +222,115 @@ const Header = () => {
     const handleLogout = () => {
         try 
         {
-            localStorage.removeItem('authToken');
-            localStorage.removeItem('token');
-            sessionStorage.removeItem('authToken');
-            
-            if (auth && auth.setToken)
-                auth.setToken(null);
-            
+            auth.removeToken();
+            apiClient.removeToken();
             localStorage.removeItem('uploadedVideos');
+            setUserRole(null);
             navigate('/authorization');
         } 
         catch (err) 
         {
             console.error('Ошибка при выходе:', err);
             setError('Не удалось выйти из системы');
+        }
+    };
+
+    const handleCopyInvitation = async () => {
+        setIsCreatingInvitation(true);
+        setError(null);
+        setSuccessMessage(null);
+
+        try {
+            if (!auth.isAuthenticated()) {
+                throw new Error('Требуется авторизация');
+            }
+
+            // Create invitation
+            const invitationData = await apiClient.createInvitation();
+            
+            // Extract code from link
+            // API returns { link: string, admin_id: number }
+            // The link might be a full URL or just a code
+            let invitationCode = '';
+            let fullLink = '';
+            
+            if (invitationData.link) {
+                fullLink = invitationData.link;
+                // Try to extract code from link (last part after /)
+                const parts = invitationData.link.split('/');
+                invitationCode = parts[parts.length - 1] || invitationData.link;
+            } else if (invitationData.code) {
+                invitationCode = invitationData.code;
+                fullLink = invitationData.code;
+            } else {
+                // Fallback: use admin_id as code
+                invitationCode = invitationData.admin_id?.toString() || '';
+                fullLink = invitationCode;
+            }
+
+            // Copy code to clipboard (prefer code over full link)
+            const textToCopy = invitationCode || fullLink;
+            
+            try {
+                await navigator.clipboard.writeText(textToCopy);
+                setSuccessMessage(
+                    fullLink !== textToCopy 
+                        ? `Код скопирован: ${textToCopy}` 
+                        : `Пригласительный код скопирован: ${textToCopy}`
+                );
+                
+                // Clear success message after 5 seconds
+                setTimeout(() => {
+                    setSuccessMessage(null);
+                }, 5000);
+            } catch (clipboardErr) {
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = textToCopy;
+                textArea.style.position = 'fixed';
+                textArea.style.left = '-999999px';
+                textArea.style.top = '0';
+                document.body.appendChild(textArea);
+                textArea.focus();
+                textArea.select();
+                try {
+                    const successful = document.execCommand('copy');
+                    if (successful) {
+                        setSuccessMessage(
+                            fullLink !== textToCopy 
+                                ? `Код скопирован: ${textToCopy}` 
+                                : `Пригласительный код скопирован: ${textToCopy}`
+                        );
+                        setTimeout(() => {
+                            setSuccessMessage(null);
+                        }, 5000);
+                    } else {
+                        throw new Error('Copy failed');
+                    }
+                } catch (err) {
+                    // If copy fails, show the code for manual copy
+                    setSuccessMessage(`Код: ${textToCopy} (нажмите для копирования)`);
+                    setTimeout(() => {
+                        setSuccessMessage(null);
+                    }, 8000);
+                }
+                document.body.removeChild(textArea);
+            }
+        } catch (err) {
+            console.error('Ошибка при создании пригласительного кода:', err);
+            
+            if (err.type === 'network') {
+                setError(err.message);
+            } else if (err.type === 'unauthorized' || err.status === 401) {
+                setError('Сессия истекла. Пожалуйста, войдите снова.');
+                setTimeout(() => {
+                    navigate('/authorization');
+                }, 2000);
+            } else {
+                setError(err.message || 'Не удалось создать пригласительный код');
+            }
+        } finally {
+            setIsCreatingInvitation(false);
         }
     };
 
@@ -292,6 +348,55 @@ const Header = () => {
                         <span>{error}</span>
                         <button onClick={() => setError(null)}>×</button>
                     </div>
+                )}
+                {successMessage && (
+                    <div className="header-success" style={{
+                        background: '#4caf50',
+                        color: 'white',
+                        padding: '8px 16px',
+                        borderRadius: '4px',
+                        marginRight: '10px',
+                        fontSize: '14px',
+                        maxWidth: '400px',
+                        wordBreak: 'break-word'
+                    }}>
+                        <span>{successMessage}</span>
+                        <button onClick={() => setSuccessMessage(null)} style={{
+                            marginLeft: '10px',
+                            background: 'none',
+                            border: 'none',
+                            color: 'white',
+                            cursor: 'pointer'
+                        }}>×</button>
+                    </div>
+                )}
+                {userRole === 'admin' && auth.isAuthenticated() && (
+                    <button 
+                        className="invitation-btn"
+                        onClick={handleCopyInvitation}
+                        disabled={isCreatingInvitation || isUploading}
+                        aria-label="Скопировать пригласительный код"
+                        title="Создать и скопировать пригласительный код"
+                        style={{
+                            padding: '8px 16px',
+                            marginRight: '10px',
+                            background: isCreatingInvitation ? '#ccc' : '#2196F3',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '4px',
+                            cursor: isCreatingInvitation ? 'not-allowed' : 'pointer',
+                            fontSize: '14px',
+                            fontWeight: '500'
+                        }}>
+                        {isCreatingInvitation ? (
+                            <>
+                                <span className="spinner" style={{ marginRight: '8px' }}></span>
+                                Создание...
+                            </>
+                        ) : (
+                            'Код приглашения'
+                        )}
+                    </button>
                 )}
                 <button 
                     className="upload-video-btn"

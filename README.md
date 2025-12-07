@@ -1,4 +1,117 @@
-# Getting Started with Create React App
+# BrainTube - Frontend Application
+
+Frontend приложение для анализа видео с полной интеграцией FastAPI бэкенда.
+
+## API Интеграция
+
+Проект полностью интегрирован с FastAPI бэкендом через централизованный API клиент.
+
+### Структура API
+
+- **Конфигурация**: `src/api/config.js` - настройки API (базовый URL)
+- **API Клиент**: `src/api/client.js` - централизованный клиент для всех API запросов
+- **Аутентификация**: `src/api/useAuth.js` - хук для управления токенами
+
+### Настройка API URL
+
+Создайте файл `.env` в корне проекта:
+
+```
+REACT_APP_API_URL=http://localhost:8000
+```
+
+Или используйте значение по умолчанию (http://localhost:8000).
+
+### Настройка CORS на бэкенде
+
+Для работы фронтенда с бэкендом необходимо настроить CORS на FastAPI сервере. Добавьте в ваш FastAPI приложение:
+
+```python
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],  # URL вашего React приложения
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+Это позволит браузеру отправлять запросы к API и обрабатывать preflight (OPTIONS) запросы.
+
+### Реализованные эндпоинты
+
+#### Аутентификация
+- `POST /auth/register` - Регистрация пользователя
+- `POST /auth/login` - Вход в систему
+
+#### Пользователи
+- `GET /users/` - Получить всех пользователей
+- `GET /users/me` - Получить текущего пользователя
+- `GET /users/{user_id}` - Получить пользователя по ID
+- `PUT /users/{user_id}` - Обновить пользователя
+- `DELETE /users/{user_id}` - Удалить пользователя
+
+#### Видео
+- `GET /video/` - Получить все видео пользователя
+- `POST /video/` - Создать новое видео (загрузка файла)
+- `GET /video/{video_id}` - Получить видео по ID
+- `PUT /video/{video_id}` - Обновить видео
+- `DELETE /video/{video_id}` - Удалить видео
+- `GET /video/file/{video_id}` - Скачать файл видео
+
+#### Админ-пользователи
+- `POST /adminuser/invitation` - Создать пригласительный код
+- `POST /adminuser/join` - Присоединиться к админу
+- `GET /adminuser/my-admins` - Получить моих админов
+- `GET /adminuser/my-users` - Получить моих пользователей
+- `DELETE /adminuser/{user_id}` - Отвязать пользователя
+- `DELETE /adminuser/leave/{admin_id}` - Отвязаться от админа
+
+### Защита маршрутов
+
+Защищенные маршруты обернуты в компонент `ProtectedRoute`, который автоматически перенаправляет неавторизованных пользователей на страницу входа.
+
+Защищенные страницы:
+- `/done` - Главная страница с видео
+- `/profile` - Профиль пользователя
+- `/analyse-video` - Анализ видео
+- `/analyse-human` - Анализ человека
+
+### Использование API клиента
+
+```javascript
+import apiClient from './api/client';
+
+// Регистрация
+const user = await apiClient.register(email, password, role);
+
+// Вход
+const tokenData = await apiClient.login(email, password);
+
+// Загрузка видео
+const video = await apiClient.createVideo(file, name);
+
+// Получить все видео
+const videos = await apiClient.getAllVideos();
+
+// Получить текущего пользователя
+const currentUser = await apiClient.getCurrentUser();
+```
+
+### Обработка ошибок
+
+API клиент автоматически обрабатывает:
+- Сетевые ошибки
+- Ошибки авторизации (401) - автоматический logout
+- Ошибки валидации (422)
+- Таймауты запросов
+
+## Getting Started with Create React App
 
 This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
 

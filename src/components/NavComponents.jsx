@@ -23,12 +23,6 @@ const NavComponents = () => {
                 </button>
                 <button 
                     className="nav-button"
-                    onClick={() => handleButtonClick('bluetooth')}
-                    aria-label="Bluetooth">
-                    <img src={Bluetooh} alt="Bluetooth" className="nav-icon" />
-                </button>
-                <button 
-                    className="nav-button"
                     onClick={() => handleButtonClick('search')}
                     aria-label="Поиск">
                     <img src={Z} alt="Поиск" className="nav-icon" />
