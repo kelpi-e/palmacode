@@ -1,6 +1,7 @@
 # Project specific
 logs/
 reports/
+videos/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

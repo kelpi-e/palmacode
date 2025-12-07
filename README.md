@@ -28,7 +28,7 @@
 ### 1. Клонирование репозитория
 
 ```bash
-git clone <https://github.com/kelpi-e/palmacode.git>
+git clone https://github.com/kelpi-e/palmacode.git
 cd palmacode
 ```
 

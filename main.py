@@ -3,7 +3,7 @@ import os
 import json
 import urllib.request
 import urllib.error
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import deque
 import threading
 try:
@@ -13,7 +13,7 @@ except ImportError:
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QTabWidget, QPushButton, QLabel, QListWidget, QProgressBar,
+    QTabWidget, QPushButton, QLabel, QListWidget, QListWidgetItem, QProgressBar,
     QLineEdit, QGroupBox, QFileDialog, QFrame, QSlider, QSplitter,
     QDialog, QScrollArea, QMessageBox, QSizePolicy
 )
@@ -34,7 +34,74 @@ from widgets import MetricCard, ResistCard
 from eye_tracker import eye_tracker, GazeData, CalibrationDialog
 
 # API конфигурация
-API_BASE_URL = "http://10.128.7.198:8000"
+API_BASE_URL = "http://10.128.7.187:8099"
+
+# Папка для хранения скачанных видео
+VIDEOS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "videos")
+VIDEOS_METADATA_FILE = os.path.join(VIDEOS_DIR, "video_metadata.json")
+
+def ensure_videos_dir():
+    """Создать папку для видео, если её нет"""
+    if not os.path.exists(VIDEOS_DIR):
+        os.makedirs(VIDEOS_DIR)
+    return VIDEOS_DIR
+
+def load_video_metadata():
+    """Загрузить метаданные видео (путь -> video_id)"""
+    if not os.path.exists(VIDEOS_METADATA_FILE):
+        return {}
+    try:
+        with open(VIDEOS_METADATA_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_video_metadata(metadata):
+    """Сохранить метаданные видео"""
+    ensure_videos_dir()
+    try:
+        with open(VIDEOS_METADATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Ошибка сохранения метаданных: {e}")
+
+def get_video_id(video_path):
+    """Получить ID видео по пути. Если файл не из папки videos, вернуть 12345"""
+    if not video_path:
+        return "12345"
+    
+    # Нормализуем путь
+    video_path = os.path.normpath(os.path.abspath(video_path))
+    videos_dir = os.path.normpath(os.path.abspath(VIDEOS_DIR))
+    
+    # Проверяем, находится ли файл в папке videos (case-insensitive для Windows)
+    try:
+        if not os.path.commonpath([video_path, videos_dir]) == videos_dir:
+            return "12345"
+    except ValueError:
+        # Пути на разных дисках
+        return "12345"
+    
+    # Загружаем метаданные
+    metadata = load_video_metadata()
+    
+    # Ищем ID по пути (нормализуем все пути для сравнения)
+    video_path_normalized = os.path.normpath(os.path.abspath(video_path)).lower()
+    for path, video_id in metadata.items():
+        path_normalized = os.path.normpath(os.path.abspath(path)).lower()
+        if path_normalized == video_path_normalized:
+            return str(video_id)
+    
+    # Если не найдено, возвращаем 12345
+    return "12345"
+
+def save_video_with_id(video_path, video_id):
+    """Сохранить соответствие пути видео и его ID"""
+    metadata = load_video_metadata()
+    # Нормализуем путь для сохранения
+    video_path_normalized = os.path.normpath(os.path.abspath(video_path))
+    metadata[video_path_normalized] = int(video_id) if isinstance(video_id, str) else video_id
+    save_video_metadata(metadata)
 
 
 class AuthManager:
@@ -1383,6 +1450,9 @@ class ResultsTab(QWidget):
         self.theta = []
         self.gaze_x = []
         self.gaze_y = []
+        self.data_indices = []  # Соответствие индексов массивов индексам в self.data
+        self.attention_peaks = []  # Список пиков внимания [(time, value, data_index), ...]
+        self.peak_markers = []  # Маркеры на графике
         self.setup_ui()
     
     def setup_ui(self):
@@ -1568,6 +1638,35 @@ class ResultsTab(QWidget):
         gaze_layout.addWidget(self.gaze_plot)
         scroll_layout.addWidget(gaze_group)
         
+        # Главные моменты (пики внимания)
+        highlights_group = QGroupBox("Главные моменты")
+        highlights_group.setMinimumHeight(150)
+        highlights_layout = QVBoxLayout(highlights_group)
+        highlights_layout.setContentsMargins(8, 20, 8, 8)
+        
+        self.highlights_list = QListWidget()
+        self.highlights_list.setStyleSheet("""
+            QListWidget {
+                background-color: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+            }
+            QListWidget::item {
+                padding: 8px;
+                border-bottom: 1px solid #21262d;
+            }
+            QListWidget::item:selected {
+                background-color: #1f6feb;
+                color: white;
+            }
+            QListWidget::item:hover:!selected {
+                background-color: #21262d;
+            }
+        """)
+        self.highlights_list.itemClicked.connect(self._on_highlight_clicked)
+        highlights_layout.addWidget(self.highlights_list)
+        scroll_layout.addWidget(highlights_group)
+        
         scroll_layout.addStretch()
         scroll.setWidget(scroll_content)
         main_layout.addWidget(scroll, stretch=1)
@@ -1748,8 +1847,9 @@ class ResultsTab(QWidget):
         self.theta = []
         self.gaze_x = []
         self.gaze_y = []
+        self.data_indices = []
         
-        for row in self.data:
+        for data_idx, row in enumerate(self.data):
             try:
                 self.times.append(float(row.get('elapsed_sec', 0)))
                 self.attention.append(float(row.get('attention', 0)))
@@ -1761,6 +1861,7 @@ class ResultsTab(QWidget):
                 gy = row.get('gaze_y', 0)
                 self.gaze_x.append(float(gx) if gx else 0)
                 self.gaze_y.append(float(gy) if gy else 0)
+                self.data_indices.append(data_idx)  # Сохраняем соответствие
             except:
                 continue
         
@@ -1769,6 +1870,10 @@ class ResultsTab(QWidget):
         if self.times:
             self.mental_plot.plot(self.times, self.attention, pen=pg.mkPen('#58a6ff', width=2), name='Внимание')
             self.mental_plot.plot(self.times, self.relaxation, pen=pg.mkPen('#a371f7', width=2), name='Расслабление')
+            
+            # Находим и отображаем пики внимания
+            self._find_attention_peaks()
+            self._display_attention_peaks()
         
         self.spectral_plot.clear()
         self.spectral_plot.addItem(self.spectral_vline)
@@ -1785,6 +1890,133 @@ class ResultsTab(QWidget):
         
         gaze_points = [(self.gaze_x[i], self.gaze_y[i], self.times[i]) for i in range(len(self.times)) if self.gaze_x[i] > 0 or self.gaze_y[i] > 0]
         self.gaze_heatmap.set_data(gaze_points)
+    
+    def _find_attention_peaks(self):
+        """Найти пики внимания в данных"""
+        if not self.times or not self.attention or len(self.times) < 3:
+            self.attention_peaks = []
+            return
+        
+        # Вычисляем среднее и стандартное отклонение
+        attention_values = [a for a in self.attention if a > 0]
+        if not attention_values:
+            self.attention_peaks = []
+            return
+        
+        mean_attention = sum(attention_values) / len(attention_values)
+        variance = sum((a - mean_attention) ** 2 for a in attention_values) / len(attention_values)
+        std_dev = variance ** 0.5
+        
+        # Порог для пика: среднее + 1.5 * стандартное отклонение
+        threshold = mean_attention + 1.5 * std_dev
+        
+        # Находим локальные максимумы выше порога
+        peaks = []
+        window_size = max(3, len(self.times) // 50)  # Адаптивный размер окна
+        
+        for i in range(window_size, len(self.attention) - window_size):
+            if self.attention[i] < threshold:
+                continue
+            
+            # Проверяем, является ли это локальным максимумом
+            is_peak = True
+            for j in range(i - window_size, i + window_size + 1):
+                if j != i and self.attention[j] >= self.attention[i]:
+                    is_peak = False
+                    break
+            
+            if is_peak:
+                # Используем индекс из data_indices для соответствия с self.data
+                data_idx = self.data_indices[i] if i < len(self.data_indices) else i
+                peaks.append((self.times[i], self.attention[i], data_idx))
+        
+        # Сортируем по значению внимания (от большего к меньшему) и берем топ-10
+        peaks.sort(key=lambda x: x[1], reverse=True)
+        self.attention_peaks = peaks[:10]
+    
+    def _display_attention_peaks(self):
+        """Отобразить пики внимания на графике и в списке"""
+        # Очищаем предыдущие маркеры
+        for marker in self.peak_markers:
+            self.mental_plot.removeItem(marker)
+        self.peak_markers.clear()
+        
+        # Очищаем список
+        self.highlights_list.clear()
+        
+        if not self.attention_peaks:
+            return
+        
+        # Добавляем маркеры на график
+        for time, value, data_index in self.attention_peaks:
+            # Вертикальная линия на графике
+            vline = pg.InfiniteLine(
+                pos=time, 
+                angle=90, 
+                pen=pg.mkPen('#f85149', width=2, style=Qt.PenStyle.DashLine),
+                movable=False
+            )
+            self.mental_plot.addItem(vline)
+            self.peak_markers.append(vline)
+            
+            # Точка на графике
+            scatter = pg.ScatterPlotItem(
+                x=[time], 
+                y=[value],
+                pen=pg.mkPen('#f85149', width=2),
+                brush=pg.mkBrush('#f85149'),
+                size=10,
+                symbol='star'
+            )
+            self.mental_plot.addItem(scatter)
+            self.peak_markers.append(scatter)
+        
+        # Заполняем список главных моментов
+        for i, (time, value, data_index) in enumerate(self.attention_peaks, 1):
+            time_str = f"{int(time // 60):02d}:{int(time % 60):02d}"
+            item_text = f"#{i} - {time_str} | Внимание: {value:.1f}%"
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.ItemDataRole.UserRole, (time, data_index))  # Сохраняем время и индекс в data
+            self.highlights_list.addItem(item)
+    
+    def _on_highlight_clicked(self, item):
+        """Переход к выбранному моменту при клике на элемент списка"""
+        time, index = item.data(Qt.ItemDataRole.UserRole)
+        
+        # Перемещаем вертикальную линию на графике
+        self.mental_vline.setPos(time)
+        self.spectral_vline.setPos(time)
+        self.gaze_vline.setPos(time)
+        
+        # Перемещаем видео на этот момент (если видео загружено)
+        if self.video_path and self.media_player.duration() > 0:
+            # Конвертируем время в миллисекунды
+            video_pos_ms = int(time * 1000)
+            if video_pos_ms <= self.media_player.duration():
+                self.media_player.setPosition(video_pos_ms)
+                self.video_slider.setValue(video_pos_ms)
+        
+        # Обновляем данные для текущей позиции
+        if index < len(self.data):
+            record = self.data[index]
+            attention_val = record.get('attention', 0)
+            relaxation_val = record.get('relaxation', 0)
+            self.cur_attention.set_value(f"{attention_val:.0f}%" if attention_val else "--")
+            self.cur_relaxation.set_value(f"{relaxation_val:.0f}%" if relaxation_val else "--")
+            self.cur_alpha.set_value(f"{record.get('alpha', 0)}%")
+            self.cur_beta.set_value(f"{record.get('beta', 0)}%")
+            self.cur_theta.set_value(f"{record.get('theta', 0)}%")
+            
+            gaze_x = record.get('gaze_x', 0)
+            gaze_y = record.get('gaze_y', 0)
+            self.cur_gaze_x.set_value(f"{gaze_x:.2f}" if gaze_x else "--")
+            self.cur_gaze_y.set_value(f"{gaze_y:.2f}" if gaze_y else "--")
+            
+            # Обновляем карту взгляда
+            if gaze_x and gaze_y:
+                self.gaze_heatmap.set_current_position(gaze_x, gaze_y)
+            else:
+                self.gaze_heatmap.clear_current_position()
 
 
 class ConnectionTab(QWidget):
@@ -2924,7 +3156,7 @@ class VideoRecordingTab(QWidget):
     def _write_record(self):
         if not self.is_recording:
             return
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         elapsed = (now - self.recording_start_time).total_seconds()
         video_pos = self.media_player.position() if self.video_loaded else 0
         gaze = self.current_gaze_data
@@ -3023,14 +3255,16 @@ class VideoRecordingTab(QWidget):
         
         # Отправка данных по WebSocket
         if self.record_data:
-            self._send_data_via_websocket(self.record_data)
+            # Определяем ID видео
+            video_id = get_video_id(self.video_file_path)
+            self._send_data_via_websocket(self.record_data, video_id)
         
         self.record_status.setText("Готово")
         self.record_status.setStyleSheet("color: #3fb950; font-weight: 600;")
         self.start_record_btn.setEnabled(True)
         self.stop_record_btn.setEnabled(False)
     
-    def _send_data_via_websocket(self, data):
+    def _send_data_via_websocket(self, data, video_id="12345"):
         """Отправка данных по WebSocket в отдельном потоке"""
         if websocket is None:
             print("Библиотека websocket-client не установлена. Установите: pip install websocket-client")
@@ -3038,14 +3272,15 @@ class VideoRecordingTab(QWidget):
         
         def send_in_thread():
             try:
-                ws_url = "ws://10.128.7.6:8099/influxdbpoints/ws/login/12345"
+                # Используем video_id в URL
+                ws_url = f"ws://10.128.7.6:8099/influxdbpoints/ws/login/{video_id}"
                 ws = websocket.create_connection(ws_url)
                 
                 # Отправляем данные как JSON массив
                 json_data = json.dumps(data, ensure_ascii=False)
                 ws.send(json_data)
                 
-                # Получаем ответ (опционально)
+                # Получаем ответ
                 try:
                     response = ws.recv()
                     print(f"WebSocket ответ: {response}")
@@ -3325,17 +3560,27 @@ class VideoLibraryTab(QWidget):
         if not auth_manager.is_authenticated():
             return
         
-        # Выбор места сохранения
-        default_name = video_name if video_name.endswith('.mp4') else f"{video_name}.mp4"
-        save_path, _ = QFileDialog.getSaveFileName(
-            self, 
-            "Сохранить видео", 
-            default_name,
-            "Видео (*.mp4);;Все файлы (*.*)"
-        )
+        # Создаем папку для видео
+        ensure_videos_dir()
         
-        if not save_path:
-            return
+        # Формируем имя файла с ID
+        if not video_name.endswith('.mp4'):
+            video_name = f"{video_name}.mp4"
+        # Убираем расширение, добавляем ID и снова добавляем расширение
+        name_without_ext = os.path.splitext(video_name)[0]
+        filename = f"{name_without_ext}_id{video_id}.mp4"
+        save_path = os.path.join(VIDEOS_DIR, filename)
+        
+        # Если файл уже существует, спрашиваем подтверждение
+        if os.path.exists(save_path):
+            reply = QMessageBox.question(
+                self,
+                "Файл существует",
+                f"Файл уже существует:\n{save_path}\n\nПерезаписать?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                return
         
         # Скачиваем файл
         url = f"{API_BASE_URL}/video/file/{video_id}"
@@ -3350,6 +3595,9 @@ class VideoLibraryTab(QWidget):
             with urllib.request.urlopen(req, timeout=60) as response:
                 with open(save_path, 'wb') as f:
                     f.write(response.read())
+            
+            # Сохраняем метаданные (путь -> video_id)
+            save_video_with_id(save_path, video_id)
             
             # Успех
             msg = QMessageBox(self)
@@ -3421,6 +3669,9 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    # Создаем папку для видео при запуске
+    ensure_videos_dir()
+    
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLESHEET)
     window = MainWindow()
